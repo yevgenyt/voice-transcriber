@@ -1,0 +1,26 @@
+# Virtual environment
+venv/
+env/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Audio/temp files
+*.wav
+/tmp/
