@@ -11,6 +11,8 @@ Press **Left Shift + Left Ctrl + Space** to speak instructions. Your M6 ZealSoun
 - 🎯 **Works anywhere** - Compatible with Wayland, X11, any Linux desktop
 - ⚡ **CPU optimized** - Fast transcription on CPU; ROCm GPU acceleration available (see notes)
 - 🔐 **Privacy-first** - All processing happens locally on your machine
+- 📊 **Audio level analysis** - Reports signal quality, noise floor, and SNR after each recording
+- 🔧 **Auto-gain adjustment** - Gradually optimizes microphone gain to ideal levels
 
 ## Quick Start
 
@@ -92,14 +94,56 @@ Keyboard (evdev) ──→ Hotkey Detection ──→ Audio Recording (48kHz)
 
 ## Configuration
 
-Edit `transcriber.py` (lines 25-33) to customize:
+Edit `transcriber.py` (lines 26-38) to customize:
 
 ```python
 WHISPER_MODEL = "medium"         # Options: tiny, base, small, medium, large
 AUTO_PUNCTUATION = True          # Add periods and capitalization
 USE_GPU = True                   # Use GPU if available (ROCm on AMD, CUDA on NVIDIA)
-MICROPHONE_GAIN = 2.0            # Microphone amplification
+MICROPHONE_GAIN = 0.88           # Microphone amplification (auto-tuned)
+
+# Audio level targets for normalization
+IDEAL_FINAL_PEAK = 0.8           # Target peak after processing (0.8 = conservative)
+IDEAL_FINAL_PEAK_MIN = 0.7       # Too quiet if below this
+IDEAL_FINAL_PEAK_MAX = 0.9       # Too loud if above this
 ```
+
+### Auto-Gain Adjustment
+
+The transcriber automatically tunes `MICROPHONE_GAIN` by analyzing audio levels after each recording:
+
+- **Measures** raw peak, noise floor, denoised signal, and final peak
+- **Calculates** SNR (signal-to-noise ratio) to assess audio quality
+- **Recommends** ideal gain to reach the target peak (0.8x)
+- **Adjusts gradually** by 50% of recommended change per recording
+- **Persists** the optimized gain to the config file
+
+**Example output after recording:**
+```
+============================================================
+📊 AUDIO LEVEL ANALYSIS
+============================================================
+Raw Audio Peak:           0.0675 (before any processing)
+Noise Floor (estimated):  0.0003
+Denoised Peak:            0.0675
+Final Peak (after gain):  0.5685
+
+Signal-to-Noise Ratio:    28.7 dB (denoised signal)
+
+Ideal Target Peak:        0.80 (range: 0.70-0.90)
+Current Peak vs Target:   -0.2315 (-28.9%)
+
+Current MICROPHONE_GAIN:  0.84x
+✓ Audio level is good!
+============================================================
+```
+
+**How it works:**
+1. After each recording, audio levels are analyzed
+2. If levels are off-target, a gain adjustment is recommended
+3. Adjustment is applied gradually (50% convergence per step)
+4. `MICROPHONE_GAIN` is automatically updated in config
+5. Next recording uses the new gain—no restart needed!
 
 ## Troubleshooting
 
@@ -210,9 +254,12 @@ When you need to continue:
 - Auto-detection of audio device (portable across machines)
 - Complete requirements.txt with all dependencies
 
-✅ **Features:**
+✅ **Audio Quality Features:**
 - Auto-punctuation (periods, capitalization)
 - High-accuracy Whisper (medium model for better transcription quality)
+- Audio level analysis (reports SNR, noise floor, peak levels)
+- Auto-gain adjustment (gradually optimizes microphone gain)
+- Intelligent thresholds (only adjusts >5% differences, clamps 0.1x-10.0x)
 - CPU-optimized with potential for ROCm GPU acceleration
 
 ## GPU Acceleration (Optional)
@@ -273,5 +320,5 @@ All data stays on your machine:
 
 ---
 
-**Status**: Production-ready with all critical fixes applied. Using Whisper medium model on CPU.
-**Last Updated**: January 17, 2026 (GPU investigation complete)
+**Status**: Production-ready with audio level analysis and auto-gain tuning. Using Whisper medium model on CPU.
+**Last Updated**: January 17, 2026 (Audio level analysis & auto-adjustment added)
