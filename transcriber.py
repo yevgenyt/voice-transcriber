@@ -8,6 +8,7 @@ Hotkey: Left Shift + Left Ctrl + Space
 
 import os
 import sys
+import re
 import sounddevice as sd
 import numpy as np
 import soundfile as sf
@@ -27,10 +28,15 @@ WHISPER_MODEL = "medium"
 SILENCE_TIMEOUT = 1
 SAMPLE_RATE = 48000
 AUDIO_CHANNELS = 2
-MICROPHONE_GAIN = 2.0
+MICROPHONE_GAIN = 0.88
 AUTO_PUNCTUATION = True
 USE_GPU = True
 WHISPER_SAMPLE_RATE = 16000
+
+# Audio level targets for normalization reporting
+IDEAL_FINAL_PEAK = 0.8  # Target peak after normalization + gain
+IDEAL_FINAL_PEAK_MIN = 0.7
+IDEAL_FINAL_PEAK_MAX = 0.9
 
 # Hotkey codes
 KEY_LEFTSHIFT = ecodes.KEY_LEFTSHIFT
@@ -60,6 +66,7 @@ class VoiceTranscriber:
         self.model = None
         self.keyboard_device = None
         self.audio_device = None
+        self.current_gain = MICROPHONE_GAIN  # Track current gain for auto-adjustment
         self._setup_whisper()
         self._find_audio_device()  # CRITICAL: Auto-detect
         self._find_keyboard_device()
@@ -158,6 +165,93 @@ class VoiceTranscriber:
         # Use scipy's polyphase resampler (prevents aliasing)
         return scipy.signal.resample_poly(audio, target_sr, orig_sr)
 
+    def _apply_gradual_gain_adjustment(self, recommended_gain):
+        """Apply 50% of recommended adjustment gradually, and persist to config."""
+        # Only adjust if recommendation differs meaningfully from current (>5%)
+        diff_percent = abs(recommended_gain - self.current_gain) / self.current_gain * 100
+        if diff_percent < 5:
+            return  # Too small to adjust
+
+        # Apply 50% of the difference
+        adjustment = (recommended_gain - self.current_gain) * 0.5
+        new_gain = self.current_gain + adjustment
+        new_gain = max(0.1, min(10.0, new_gain))  # Clamp between 0.1x and 10.0x
+
+        if abs(new_gain - self.current_gain) > 0.01:  # Only report if meaningful change
+            print(f"\n🔧 AUTO-ADJUST: Gain {self.current_gain:.2f}x → {new_gain:.2f}x (+{adjustment:+.2f})")
+            self.current_gain = new_gain
+            self._update_config_gain(new_gain)
+
+    def _update_config_gain(self, new_gain):
+        """Update MICROPHONE_GAIN in the config file."""
+        try:
+            config_path = os.path.abspath(__file__)
+            with open(config_path, 'r') as f:
+                content = f.read()
+
+            # Replace MICROPHONE_GAIN value
+            updated_content = re.sub(
+                r'(MICROPHONE_GAIN\s*=\s*)[\d.]+',
+                lambda m: f'{m.group(1)}{new_gain:.2f}',
+                content
+            )
+
+            with open(config_path, 'w') as f:
+                f.write(updated_content)
+        except Exception as e:
+            print(f"⚠️  Could not update config file: {e}")
+
+    def _analyze_audio_levels(self, raw_audio, noise_sample, denoised_audio, final_audio):
+        """Analyze and report audio levels with gain recommendations. Returns recommended gain."""
+        raw_peak = np.abs(raw_audio).max()
+        denoised_peak = np.abs(denoised_audio).max()
+        final_peak = np.abs(final_audio).max()
+
+        # Calculate RMS levels (perceived loudness)
+        raw_rms = np.sqrt(np.mean(raw_audio ** 2))
+        denoised_rms = np.sqrt(np.mean(denoised_audio ** 2))
+        final_rms = np.sqrt(np.mean(final_audio ** 2))
+
+        # Calculate SNR (Signal-to-Noise Ratio)
+        if noise_sample > 0:
+            snr_db = 20 * np.log10(denoised_rms / noise_sample) if denoised_rms > 0 else 0
+        else:
+            snr_db = float('inf')
+
+        # Determine if current gain is appropriate
+        diff_from_ideal = final_peak - IDEAL_FINAL_PEAK
+        gain_adjustment_needed = diff_from_ideal / IDEAL_FINAL_PEAK * 100 if IDEAL_FINAL_PEAK > 0 else 0
+
+        # Calculate recommended gain
+        # Note: normalization always brings peak to 0.95, so:
+        # final_peak = 0.95 * GAIN, therefore GAIN = final_peak / 0.95
+        recommended_gain = IDEAL_FINAL_PEAK / 0.95
+
+        print("\n" + "=" * 60)
+        print("📊 AUDIO LEVEL ANALYSIS")
+        print("=" * 60)
+        print(f"Raw Audio Peak:           {raw_peak:.4f} (before any processing)")
+        print(f"Noise Floor (estimated):  {noise_sample:.4f}")
+        print(f"Denoised Peak:            {denoised_peak:.4f}")
+        print(f"Final Peak (after gain):  {final_peak:.4f}")
+        print(f"\nSignal-to-Noise Ratio:    {snr_db:.1f} dB (denoised signal)")
+        print(f"\nIdeal Target Peak:        {IDEAL_FINAL_PEAK:.2f} (range: {IDEAL_FINAL_PEAK_MIN:.2f}-{IDEAL_FINAL_PEAK_MAX:.2f})")
+        print(f"Current Peak vs Target:   {diff_from_ideal:+.4f} ({gain_adjustment_needed:+.1f}%)")
+
+        # Gain recommendation
+        print(f"\nCurrent MICROPHONE_GAIN:  {self.current_gain:.2f}x")
+        if final_peak < IDEAL_FINAL_PEAK_MIN:
+            print(f"❌ Audio too quiet!")
+            print(f"   Recommended MICROPHONE_GAIN: {recommended_gain:.2f}x")
+        elif final_peak > IDEAL_FINAL_PEAK_MAX:
+            print(f"⚠️  Audio too loud (risk of clipping)!")
+            print(f"   Recommended MICROPHONE_GAIN: {recommended_gain:.2f}x")
+        else:
+            print(f"✓ Audio level is good!")
+
+        print("=" * 60)
+        return recommended_gain
+
     def record_and_transcribe(self):
         """Record audio and transcribe it using Whisper."""
         # CRITICAL FIX: Thread-safe recording check with lock
@@ -230,10 +324,18 @@ class VoiceTranscriber:
                                 normalized = all_audio / peak * 0.9
                         else:
                             normalized = all_audio
+                            noise_sample = 0
+                            audio_denoised = all_audio
 
                         # Apply gain
-                        amplified = np.clip(normalized * MICROPHONE_GAIN, -0.95, 0.95)
+                        amplified = np.clip(normalized * self.current_gain, -0.95, 0.95)
                         audio_int16 = (amplified * 32767).astype(np.int16)
+
+                        # Analyze and report audio levels
+                        recommended_gain = self._analyze_audio_levels(all_audio, noise_sample, audio_denoised, amplified)
+
+                        # Auto-adjust gain gradually (50% of difference)
+                        self._apply_gradual_gain_adjustment(recommended_gain)
 
                         # Save to temp file
                         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
