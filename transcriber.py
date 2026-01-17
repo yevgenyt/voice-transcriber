@@ -37,6 +37,7 @@ WHISPER_SAMPLE_RATE = 16000
 IDEAL_FINAL_PEAK = 0.8  # Target peak after normalization + gain
 IDEAL_FINAL_PEAK_MIN = 0.7
 IDEAL_FINAL_PEAK_MAX = 0.9
+AUDIO_ANALYSIS_VERBOSE = False  # Set to True to see detailed level breakdown
 
 # Hotkey codes
 KEY_LEFTSHIFT = ecodes.KEY_LEFTSHIFT
@@ -227,29 +228,34 @@ class VoiceTranscriber:
         # final_peak = 0.95 * GAIN, therefore GAIN = final_peak / 0.95
         recommended_gain = IDEAL_FINAL_PEAK / 0.95
 
-        print("\n" + "=" * 60)
-        print("📊 AUDIO LEVEL ANALYSIS")
-        print("=" * 60)
-        print(f"Raw Audio Peak:           {raw_peak:.4f} (before any processing)")
-        print(f"Noise Floor (estimated):  {noise_sample:.4f}")
-        print(f"Denoised Peak:            {denoised_peak:.4f}")
-        print(f"Final Peak (after gain):  {final_peak:.4f}")
-        print(f"\nSignal-to-Noise Ratio:    {snr_db:.1f} dB (denoised signal)")
-        print(f"\nIdeal Target Peak:        {IDEAL_FINAL_PEAK:.2f} (range: {IDEAL_FINAL_PEAK_MIN:.2f}-{IDEAL_FINAL_PEAK_MAX:.2f})")
-        print(f"Current Peak vs Target:   {diff_from_ideal:+.4f} ({gain_adjustment_needed:+.1f}%)")
-
-        # Gain recommendation
-        print(f"\nCurrent MICROPHONE_GAIN:  {self.current_gain:.2f}x")
+        # Determine status
         if final_peak < IDEAL_FINAL_PEAK_MIN:
-            print(f"❌ Audio too quiet!")
-            print(f"   Recommended MICROPHONE_GAIN: {recommended_gain:.2f}x")
+            status = "❌ Too quiet"
         elif final_peak > IDEAL_FINAL_PEAK_MAX:
-            print(f"⚠️  Audio too loud (risk of clipping)!")
-            print(f"   Recommended MICROPHONE_GAIN: {recommended_gain:.2f}x")
+            status = "⚠️  Too loud"
         else:
-            print(f"✓ Audio level is good!")
+            status = "✓ Good"
 
-        print("=" * 60)
+        # Lean output (default)
+        print(f"\n📊 Peak: {final_peak:.3f} | SNR: {snr_db:.1f}dB | {status}")
+
+        # Verbose output (optional)
+        if AUDIO_ANALYSIS_VERBOSE:
+            print("\n" + "=" * 60)
+            print("📊 DETAILED AUDIO LEVEL ANALYSIS")
+            print("=" * 60)
+            print(f"Raw Audio Peak:           {raw_peak:.4f} (before any processing)")
+            print(f"Noise Floor (estimated):  {noise_sample:.4f}")
+            print(f"Denoised Peak:            {denoised_peak:.4f}")
+            print(f"Final Peak (after gain):  {final_peak:.4f}")
+            print(f"\nSignal-to-Noise Ratio:    {snr_db:.1f} dB (denoised signal)")
+            print(f"\nIdeal Target Peak:        {IDEAL_FINAL_PEAK:.2f} (range: {IDEAL_FINAL_PEAK_MIN:.2f}-{IDEAL_FINAL_PEAK_MAX:.2f})")
+            print(f"Current Peak vs Target:   {diff_from_ideal:+.4f} ({gain_adjustment_needed:+.1f}%)")
+            print(f"\nCurrent MICROPHONE_GAIN:  {self.current_gain:.2f}x")
+            if final_peak < IDEAL_FINAL_PEAK_MIN or final_peak > IDEAL_FINAL_PEAK_MAX:
+                print(f"Recommended MICROPHONE_GAIN: {recommended_gain:.2f}x")
+            print("=" * 60)
+
         return recommended_gain
 
     def record_and_transcribe(self):
