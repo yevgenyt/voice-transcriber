@@ -9,7 +9,6 @@ Hotkey: Left Shift + Left Ctrl + Space
 import os
 import sys
 import re
-import warnings
 import sounddevice as sd
 import numpy as np
 import soundfile as sf
@@ -20,12 +19,17 @@ from faster_whisper import WhisperModel
 from pynput.keyboard import Controller
 from evdev import InputDevice, list_devices, ecodes
 import tempfile
-
-# Suppress pynput cleanup warnings (harmless but noisy)
-warnings.filterwarnings("ignore", category=AttributeError)
+import atexit
 
 # Save original stderr for restoration
 original_stderr = sys.stderr
+
+# Suppress pynput cleanup errors on exit
+def _suppress_pynput_exit_errors():
+    """Suppress harmless pynput cleanup errors at exit."""
+    sys.stderr = open(os.devnull, 'w')
+
+atexit.register(_suppress_pynput_exit_errors)
 
 # Configuration
 WHISPER_MODEL = "medium"
