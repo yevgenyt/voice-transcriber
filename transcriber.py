@@ -78,6 +78,7 @@ class VoiceTranscriber:
         self.current_gain = MICROPHONE_GAIN  # Track current gain for auto-adjustment
         self._setup_whisper()
         self._find_audio_device()  # CRITICAL: Auto-detect
+        self._verify_audio_device()  # Verify device is actually working
         self._find_keyboard_device()
 
     def _setup_whisper(self):
@@ -127,6 +128,37 @@ class VoiceTranscriber:
         except Exception as e:
             print(f"❌ Error finding audio device: {e}")
             sys.exit(1)
+
+    def _verify_audio_device(self):
+        """Verify the audio device is actually working by doing a test recording."""
+        print("Verifying audio device...", end=" ")
+        try:
+            with suppress_stderr():
+                # Record 0.5 seconds and check if we get any audio
+                stream = sd.InputStream(
+                    device=self.audio_device,
+                    samplerate=SAMPLE_RATE,
+                    channels=AUDIO_CHANNELS,
+                    blocksize=4096,
+                    dtype=np.float32
+                )
+                with stream:
+                    data, _ = stream.read(int(SAMPLE_RATE * 0.5))  # 0.5 second
+
+                # Check if device actually captured data (not all zeros)
+                if np.abs(data).max() > 0.0001:
+                    print("✓")
+                    return True
+                else:
+                    print("✗ (no audio detected)")
+                    print("⚠️  Audio device not responding. Try:")
+                    print("  1. Unplug microphone, wait 3 seconds, plug back in")
+                    print("  2. Run: sudo modprobe -r snd_usb_audio && sudo modprobe snd_usb_audio")
+                    print("  3. Restart the transcriber")
+                    return False
+        except Exception as e:
+            print(f"✗ ({e})")
+            return False
 
     def _find_keyboard_device(self):
         """Find and open the keyboard device using evdev."""
