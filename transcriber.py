@@ -272,6 +272,7 @@ class VoiceTranscriber:
 
         self.should_stop_recording = False
         print("\n🎤 Recording... (release hotkey to stop)")
+        overflow_count = 0  # Track overflows across recording session
 
         try:
             with suppress_stderr():
@@ -279,8 +280,9 @@ class VoiceTranscriber:
                     device=self.audio_device,
                     samplerate=SAMPLE_RATE,
                     channels=AUDIO_CHANNELS,
-                    blocksize=4096,
-                    dtype=np.float32
+                    blocksize=8192,
+                    dtype=np.float32,
+                    latency="high"  # Allow larger buffers to prevent overflow
                 )
 
                 with stream:
@@ -289,9 +291,13 @@ class VoiceTranscriber:
 
                     while not self.should_stop_recording:
                         try:
-                            data, overflowed = stream.read(4096)
+                            data, overflowed = stream.read(8192)
                             if overflowed:
-                                print("⚠️  Audio overflow detected")
+                                overflow_count += 1
+                                if overflow_count == 1:
+                                    print("⚠️  Audio buffer overflowing - reconnect mic or reduce background noise")
+                                # Skip this corrupted block
+                                continue
 
                             # Convert stereo to mono
                             if AUDIO_CHANNELS == 2:
@@ -304,8 +310,8 @@ class VoiceTranscriber:
                             resampled_audio.append(resampled)
 
                             block_count += 1
-                            if block_count % 12 == 0:
-                                duration = block_count * 4096 / SAMPLE_RATE
+                            if block_count % 6 == 0:
+                                duration = block_count * 8192 / SAMPLE_RATE
                                 print(f"  [{duration:.1f}s recorded]", end="\r")
 
                         except Exception as e:
@@ -362,6 +368,8 @@ class VoiceTranscriber:
             return
 
         # Transcribe
+        if overflow_count > 0:
+            print(f"\n⚠️  Recording had {overflow_count} overflows - audio quality may be degraded")
         print("\n⏳ Transcribing...")
         transcribed_text = self._transcribe_audio(temp_path)
 
