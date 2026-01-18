@@ -9,6 +9,7 @@ Hotkey: Left Shift + Left Ctrl + Space
 import os
 import sys
 import re
+import warnings
 import sounddevice as sd
 import numpy as np
 import soundfile as sf
@@ -19,6 +20,9 @@ from faster_whisper import WhisperModel
 from pynput.keyboard import Controller
 from evdev import InputDevice, list_devices, ecodes
 import tempfile
+
+# Suppress pynput cleanup warnings (harmless but noisy)
+warnings.filterwarnings("ignore", category=AttributeError)
 
 # Save original stderr for restoration
 original_stderr = sys.stderr
@@ -451,11 +455,26 @@ class VoiceTranscriber:
         except KeyboardInterrupt:
             print("\n\n👋 Transcriber stopped")
             sys.exit(0)
-        except (OSError, PermissionError) as e:
+        except OSError as e:
+            if e.errno == 19:  # ENODEV - No such device
+                print(f"\n✗ Keyboard device disconnected: {e}")
+                print("\nYour keyboard was turned off or unplugged.")
+                print("Please reconnect it and restart the transcriber.")
+            elif e.errno in (13, 1):  # EACCES (13) or EPERM (1) - Permission errors
+                print(f"\n✗ Permission error: {e}")
+                print("\nYou need to be in the 'input' group to read keyboard events.")
+                print("Run these commands:")
+                print("  sudo usermod -a -G input $USER")
+                print("  # Then log out and log back in")
+            else:
+                print(f"\n✗ Device error: {e}")
+            sys.exit(1)
+        except PermissionError as e:
             print(f"\n✗ Permission error: {e}")
             print("\nYou need to be in the 'input' group to read keyboard events.")
             print("Run these commands:")
             print("  sudo usermod -a -G input $USER")
+            print("  # Then log out and log back in")
             sys.exit(1)
 
 
