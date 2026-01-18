@@ -42,9 +42,9 @@ USE_GPU = True
 WHISPER_SAMPLE_RATE = 16000
 
 # Audio level targets for normalization reporting
-IDEAL_FINAL_PEAK = 0.8  # Target peak after normalization + gain
-IDEAL_FINAL_PEAK_MIN = 0.7
-IDEAL_FINAL_PEAK_MAX = 0.9
+IDEAL_FINAL_PEAK = 0.7  # Target peak after normalization + gain (lower = more amplification)
+IDEAL_FINAL_PEAK_MIN = 0.65
+IDEAL_FINAL_PEAK_MAX = 0.85
 AUDIO_ANALYSIS_VERBOSE = False  # Set to True to see detailed level breakdown
 
 # Hotkey codes
