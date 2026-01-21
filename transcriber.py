@@ -46,6 +46,13 @@ WHISPER_SAMPLE_RATE = 16000
 RECORDING_WARN_THRESHOLD = 30   # Yellow warning
 RECORDING_LONG_THRESHOLD = 60   # Red warning
 
+# Noise gate settings (asymmetric attack/release)
+NOISE_GATE_ATTACK_MS = 5        # Fast attack (ms) - quickly respond to speech
+NOISE_GATE_RELEASE_MS = 300     # Slow release (ms) - gradually fade during pauses
+NOISE_GATE_THRESHOLD = 2.0      # Multiplier of noise floor to trigger gate open
+NOISE_GATE_REDUCTION = 0.1      # Gain reduction when gate is closed (0.1 = -20dB)
+NOISE_GATE_VERBOSE = False      # Set to True to see noise gate metrics after each recording
+
 # Audio level targets for normalization reporting
 IDEAL_FINAL_PEAK = 0.7  # Target peak after normalization + gain (lower = more amplification)
 IDEAL_FINAL_PEAK_MIN = 0.65
@@ -348,6 +355,69 @@ class VoiceTranscriber:
 
         return recommended_gain
 
+    def _apply_noise_gate(self, audio, sample_rate, noise_floor):
+        """
+        Apply noise gate with fast attack / slow release to reduce AGC pumping artifacts.
+        Returns (processed_audio, metrics_dict).
+        """
+        # Convert time constants to samples
+        attack_samples = int(NOISE_GATE_ATTACK_MS * sample_rate / 1000)
+        release_samples = int(NOISE_GATE_RELEASE_MS * sample_rate / 1000)
+
+        # Compute envelope using RMS in small windows
+        window_size = max(int(sample_rate * 0.01), 1)  # 10ms windows
+        envelope = np.zeros(len(audio))
+
+        for i in range(0, len(audio), window_size):
+            end = min(i + window_size, len(audio))
+            rms = np.sqrt(np.mean(audio[i:end] ** 2))
+            envelope[i:end] = rms
+
+        # Calculate metrics BEFORE processing
+        threshold = noise_floor * NOISE_GATE_THRESHOLD
+        before_silence_energy = np.mean(envelope[envelope < threshold] ** 2) if np.any(envelope < threshold) else 0
+        before_speech_energy = np.mean(envelope[envelope >= threshold] ** 2) if np.any(envelope >= threshold) else 0
+
+        # Apply asymmetric smoothing to envelope
+        smoothed = np.zeros(len(envelope))
+        smoothed[0] = envelope[0]
+
+        for i in range(1, len(envelope)):
+            if envelope[i] > smoothed[i-1]:
+                # Attack: signal increasing - respond quickly
+                alpha = 1.0 - np.exp(-1.0 / max(attack_samples, 1))
+            else:
+                # Release: signal decreasing - respond slowly
+                alpha = 1.0 - np.exp(-1.0 / max(release_samples, 1))
+            smoothed[i] = alpha * envelope[i] + (1 - alpha) * smoothed[i-1]
+
+        # Create gain curve: full gain above threshold, reduced below
+        gain_curve = np.ones(len(audio))
+        below_threshold = smoothed < threshold
+        # Soft knee: gradual transition
+        transition_zone = (smoothed >= threshold * 0.5) & (smoothed < threshold)
+        gain_curve[below_threshold & ~transition_zone] = NOISE_GATE_REDUCTION
+        # Smooth transition in the knee
+        if np.any(transition_zone):
+            t = (smoothed[transition_zone] - threshold * 0.5) / (threshold * 0.5)
+            gain_curve[transition_zone] = NOISE_GATE_REDUCTION + t * (1.0 - NOISE_GATE_REDUCTION)
+
+        # Apply gain curve
+        processed = audio * gain_curve
+
+        # Calculate metrics AFTER processing
+        proc_envelope = np.abs(processed)
+        after_silence_energy = np.mean(proc_envelope[below_threshold] ** 2) if np.any(below_threshold) else 0
+        after_speech_energy = np.mean(proc_envelope[~below_threshold] ** 2) if np.any(~below_threshold) else 0
+
+        metrics = {
+            'silence_reduction_db': 10 * np.log10(after_silence_energy / before_silence_energy) if before_silence_energy > 0 and after_silence_energy > 0 else 0,
+            'speech_preserved_pct': 100 * after_speech_energy / before_speech_energy if before_speech_energy > 0 else 100,
+            'gate_active_pct': 100 * np.sum(below_threshold) / len(below_threshold),
+        }
+
+        return processed, metrics
+
     def _format_recording_indicator(self, duration):
         """Format recording duration with visual feedback based on length."""
         bars = int(duration / 5)  # One bar per 5 seconds
@@ -431,18 +501,38 @@ class VoiceTranscriber:
                             else:
                                 noise_sample = np.abs(all_audio[:len(all_audio)//10]).mean()
 
-                            audio_denoised = all_audio.copy()
-                            audio_denoised[np.abs(audio_denoised) < noise_sample * 1.5] = 0
+                            # Calculate SNR before noise gate
+                            raw_rms = np.sqrt(np.mean(all_audio ** 2))
+                            snr_before = 20 * np.log10(raw_rms / noise_sample) if noise_sample > 0 else 0
+
+                            # Apply noise gate with fast attack / slow release
+                            gated_audio, gate_metrics = self._apply_noise_gate(
+                                all_audio, WHISPER_SAMPLE_RATE, noise_sample
+                            )
+
+                            # Calculate SNR after noise gate
+                            gated_rms = np.sqrt(np.mean(gated_audio ** 2))
+                            snr_after = 20 * np.log10(gated_rms / (noise_sample * NOISE_GATE_REDUCTION)) if noise_sample > 0 else 0
+
+                            # Show before/after comparison (optional)
+                            if NOISE_GATE_VERBOSE:
+                                print(f"\n🔇 Noise gate: silence {gate_metrics['silence_reduction_db']:.1f}dB | "
+                                      f"speech {gate_metrics['speech_preserved_pct']:.0f}% preserved | "
+                                      f"gate active {gate_metrics['gate_active_pct']:.0f}%")
+
+                            audio_denoised = gated_audio.copy()
+                            audio_denoised[np.abs(audio_denoised) < noise_sample * 1.5 * NOISE_GATE_REDUCTION] = 0
 
                             peak_denoised = np.abs(audio_denoised).max()
                             if peak_denoised > 0:
                                 normalized = (audio_denoised / peak_denoised) * 0.95
                             else:
-                                normalized = all_audio / peak * 0.9
+                                normalized = gated_audio / np.abs(gated_audio).max() * 0.9 if np.abs(gated_audio).max() > 0 else gated_audio
                         else:
                             normalized = all_audio
                             noise_sample = 0
                             audio_denoised = all_audio
+                            gated_audio = all_audio
 
                         # Apply gain
                         amplified = np.clip(normalized * self.current_gain, -0.95, 0.95)
