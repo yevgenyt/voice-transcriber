@@ -42,6 +42,10 @@ AUTO_PUNCTUATION = True
 USE_GPU = True
 WHISPER_SAMPLE_RATE = 16000
 
+# Recording duration thresholds (seconds)
+RECORDING_WARN_THRESHOLD = 30   # Yellow warning
+RECORDING_LONG_THRESHOLD = 60   # Red warning
+
 # Audio level targets for normalization reporting
 IDEAL_FINAL_PEAK = 0.7  # Target peak after normalization + gain (lower = more amplification)
 IDEAL_FINAL_PEAK_MIN = 0.65
@@ -344,6 +348,18 @@ class VoiceTranscriber:
 
         return recommended_gain
 
+    def _format_recording_indicator(self, duration):
+        """Format recording duration with visual feedback based on length."""
+        bars = int(duration / 5)  # One bar per 5 seconds
+        bar_str = "█" * min(bars, 12)  # Max 12 bars (60 seconds)
+
+        if duration >= RECORDING_LONG_THRESHOLD:
+            return f"  🔴 [{duration:.1f}s] {bar_str} (long recording)"
+        elif duration >= RECORDING_WARN_THRESHOLD:
+            return f"  🟡 [{duration:.1f}s] {bar_str}"
+        else:
+            return f"  🟢 [{duration:.1f}s] {bar_str}"
+
     def record_and_transcribe(self):
         """Record audio and transcribe it using Whisper."""
         # CRITICAL FIX: Thread-safe recording check with lock
@@ -396,7 +412,8 @@ class VoiceTranscriber:
                             block_count += 1
                             if block_count % 6 == 0:
                                 duration = block_count * 8192 / SAMPLE_RATE
-                                print(f"  [{duration:.1f}s recorded]", end="\r")
+                                indicator = self._format_recording_indicator(duration)
+                                print(f"{indicator:<50}", end="\r")
 
                         except Exception as e:
                             print(f"⚠️  Error recording: {e}")
