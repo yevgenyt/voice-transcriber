@@ -36,7 +36,7 @@ WHISPER_MODEL = "medium"
 SILENCE_TIMEOUT = 1
 SAMPLE_RATE = 48000
 AUDIO_CHANNELS = 2
-MICROPHONE_GAIN = 0.88
+MICROPHONE_GAIN = 0.77
 AUTO_PUNCTUATION = True
 USE_GPU = True
 WHISPER_SAMPLE_RATE = 16000
@@ -110,15 +110,24 @@ class VoiceTranscriber:
 
         try:
             devices = sd.query_devices()
+
+            # Priority 1: USB devices (usually external mics)
             for idx, device in enumerate(devices):
-                if device['max_input_channels'] >= 2 and 'mini' in device['name'].lower():
+                if device['max_input_channels'] >= 1 and 'usb' in device['name'].lower():
                     self.audio_device = idx
                     print(f"✓ Audio device: {idx}: {device['name']}")
                     return
 
-            # Fallback: find any device with 2+ input channels
+            # Priority 2: Devices with 2+ channels (stereo)
             for idx, device in enumerate(devices):
                 if device['max_input_channels'] >= 2:
+                    self.audio_device = idx
+                    print(f"✓ Audio device: {idx}: {device['name']}")
+                    return
+
+            # Priority 3: Any device with 1+ channel (mono)
+            for idx, device in enumerate(devices):
+                if device['max_input_channels'] >= 1:
                     self.audio_device = idx
                     print(f"✓ Audio device: {idx}: {device['name']}")
                     return
