@@ -75,6 +75,7 @@ class VoiceTranscriber:
         self.model = None
         self.keyboard_device = None
         self.audio_device = None
+        self.device_channels = AUDIO_CHANNELS  # Will be updated by _find_audio_device
         self.current_gain = MICROPHONE_GAIN  # Track current gain for auto-adjustment
         self._setup_whisper()
         self._find_audio_device()  # CRITICAL: Auto-detect
@@ -115,21 +116,24 @@ class VoiceTranscriber:
             for idx, device in enumerate(devices):
                 if device['max_input_channels'] >= 1 and 'usb' in device['name'].lower():
                     self.audio_device = idx
-                    print(f"✓ Audio device: {idx}: {device['name']}")
+                    self.device_channels = device['max_input_channels']
+                    print(f"✓ Audio device: {idx}: {device['name']} ({device['max_input_channels']}ch)")
                     return
 
             # Priority 2: Devices with 2+ channels (stereo)
             for idx, device in enumerate(devices):
                 if device['max_input_channels'] >= 2:
                     self.audio_device = idx
-                    print(f"✓ Audio device: {idx}: {device['name']}")
+                    self.device_channels = device['max_input_channels']
+                    print(f"✓ Audio device: {idx}: {device['name']} ({device['max_input_channels']}ch)")
                     return
 
             # Priority 3: Any device with 1+ channel (mono)
             for idx, device in enumerate(devices):
                 if device['max_input_channels'] >= 1:
                     self.audio_device = idx
-                    print(f"✓ Audio device: {idx}: {device['name']}")
+                    self.device_channels = device['max_input_channels']
+                    print(f"✓ Audio device: {idx}: {device['name']} ({device['max_input_channels']}ch)")
                     return
 
             print("❌ No suitable audio device found")
@@ -147,7 +151,7 @@ class VoiceTranscriber:
                 stream = sd.InputStream(
                     device=self.audio_device,
                     samplerate=SAMPLE_RATE,
-                    channels=AUDIO_CHANNELS,
+                    channels=self.device_channels,
                     blocksize=4096,
                     dtype=np.float32
                 )
@@ -324,7 +328,7 @@ class VoiceTranscriber:
                 stream = sd.InputStream(
                     device=self.audio_device,
                     samplerate=SAMPLE_RATE,
-                    channels=AUDIO_CHANNELS,
+                    channels=self.device_channels,
                     blocksize=8192,
                     dtype=np.float32,
                     latency="high"  # Allow larger buffers to prevent overflow
@@ -344,11 +348,13 @@ class VoiceTranscriber:
                                 # Skip this corrupted block
                                 continue
 
-                            # Convert stereo to mono
-                            if AUDIO_CHANNELS == 2:
-                                mono_data = data.mean(axis=1)
+                            # Convert to mono if needed
+                            if self.device_channels == 1:
+                                mono_data = data.flatten()  # Already mono
+                            elif self.device_channels == 2:
+                                mono_data = data.mean(axis=1)  # Stereo to mono
                             else:
-                                mono_data = data.flatten()
+                                mono_data = data[:, 0]  # Multi-channel, use first channel
 
                             # CRITICAL FIX: Proper resampling
                             resampled = self._resample_audio(mono_data, SAMPLE_RATE, WHISPER_SAMPLE_RATE)
