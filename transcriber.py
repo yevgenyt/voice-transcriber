@@ -20,6 +20,7 @@ from pynput.keyboard import Controller
 from evdev import InputDevice, list_devices, ecodes
 import tempfile
 import atexit
+import subprocess
 
 # Save original stderr for restoration
 original_stderr = sys.stderr
@@ -79,6 +80,7 @@ class VoiceTranscriber:
         self.current_gain = MICROPHONE_GAIN  # Track current gain for auto-adjustment
         self._setup_whisper()
         self._find_audio_device()  # CRITICAL: Auto-detect
+        self._enable_usb_mic_agc()  # Enable AGC on USB mics (fixes silent mic after reconnect)
         self._verify_audio_device()  # Verify device is actually working
         self._find_keyboard_device()
 
@@ -141,6 +143,37 @@ class VoiceTranscriber:
         except Exception as e:
             print(f"❌ Error finding audio device: {e}")
             sys.exit(1)
+
+    def _enable_usb_mic_agc(self):
+        """Enable Auto Gain Control on USB microphone if available."""
+        if self.audio_device is None:
+            return
+
+        try:
+            device_info = sd.query_devices(self.audio_device)
+            device_name = device_info['name'].lower()
+
+            # Only apply to USB devices
+            if 'usb' not in device_name:
+                return
+
+            # Extract ALSA card number from device name (e.g., "hw:2,0" -> "2")
+            import re
+            match = re.search(r'hw:(\d+)', device_info['name'])
+            if not match:
+                return
+
+            card_num = match.group(1)
+
+            # Enable AGC using amixer
+            result = subprocess.run(
+                ['amixer', '-c', card_num, 'set', 'Auto Gain Control', 'on'],
+                capture_output=True, text=True
+            )
+            if result.returncode == 0:
+                print(f"  AGC enabled on card {card_num}")
+        except Exception:
+            pass  # AGC not available or already enabled
 
     def _verify_audio_device(self):
         """Verify the audio device is actually working by doing a test recording."""
