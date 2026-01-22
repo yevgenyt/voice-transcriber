@@ -35,7 +35,7 @@ def _suppress_pynput_exit_errors():
 atexit.register(_suppress_pynput_exit_errors)
 
 # Configuration
-WHISPER_MODEL = "medium"
+WHISPER_MODEL = "distil-small.en"
 SILENCE_TIMEOUT = 1
 SAMPLE_RATE = 48000
 AUDIO_CHANNELS = 2
@@ -43,6 +43,11 @@ MICROPHONE_GAIN = 0.77
 AUTO_PUNCTUATION = True
 USE_GPU = True
 WHISPER_SAMPLE_RATE = 16000
+
+# Whisper backend: "faster-whisper" or "whisper-cpp"
+WHISPER_BACKEND = "whisper-cpp"
+WHISPER_CPP_PATH = os.path.expanduser("~/Applications/whisper.cpp/build/bin/whisper-cli")
+WHISPER_CPP_MODEL = os.path.expanduser("~/Applications/whisper.cpp/models/ggml-small.en.bin")
 
 # Recording duration thresholds (seconds)
 RECORDING_WARN_THRESHOLD = 30   # Yellow warning
@@ -133,27 +138,38 @@ class VoiceTranscriber:
             print(f"⚠️  Could not save config: {e}")
 
     def _setup_whisper(self):
-        """Initialize Whisper model using faster-whisper."""
-        print("Initializing Whisper (faster-whisper)...")
-
-        # Detect GPU
-        import torch
-        gpu_available = torch.cuda.is_available()
-        device = "cuda" if (gpu_available and USE_GPU) else "cpu"
-        compute_type = "float16" if (gpu_available and USE_GPU) else "int8"
-
-        if gpu_available and USE_GPU:
-            print(f"✓ GPU detected: {torch.cuda.get_device_name(0)}")
+        """Initialize Whisper model."""
+        if WHISPER_BACKEND == "whisper-cpp":
+            print("Using whisper.cpp backend (Vulkan GPU)...")
+            # Verify whisper-cpp exists
+            if not os.path.exists(WHISPER_CPP_PATH):
+                print(f"❌ whisper-cli not found at: {WHISPER_CPP_PATH}")
+                sys.exit(1)
+            if not os.path.exists(WHISPER_CPP_MODEL):
+                print(f"❌ whisper.cpp model not found at: {WHISPER_CPP_MODEL}")
+                sys.exit(1)
+            print(f"✓ whisper.cpp ready (model: {os.path.basename(WHISPER_CPP_MODEL)})")
+            self.model = None  # Not used with whisper-cpp
         else:
-            print(f"  Using CPU (GPU not available or disabled)")
+            print("Initializing Whisper (faster-whisper)...")
+            # Detect GPU
+            import torch
+            gpu_available = torch.cuda.is_available()
+            device = "cuda" if (gpu_available and USE_GPU) else "cpu"
+            compute_type = "float16" if (gpu_available and USE_GPU) else "int8"
 
-        try:
-            with suppress_stderr():
-                self.model = WhisperModel(WHISPER_MODEL, device=device, compute_type=compute_type)
-            print(f"✓ Whisper {WHISPER_MODEL} initialized on {device.upper()}")
-        except Exception as e:
-            print(f"❌ Error loading Whisper: {e}")
-            sys.exit(1)
+            if gpu_available and USE_GPU:
+                print(f"✓ GPU detected: {torch.cuda.get_device_name(0)}")
+            else:
+                print(f"  Using CPU (GPU not available or disabled)")
+
+            try:
+                with suppress_stderr():
+                    self.model = WhisperModel(WHISPER_MODEL, device=device, compute_type=compute_type)
+                print(f"✓ Whisper {WHISPER_MODEL} initialized on {device.upper()}")
+            except Exception as e:
+                print(f"❌ Error loading Whisper: {e}")
+                sys.exit(1)
 
     def _find_audio_device(self):
         """Auto-detect audio input device."""
@@ -667,15 +683,17 @@ class VoiceTranscriber:
         return text
 
     def _transcribe_audio(self, audio_path):
-        """Transcribe audio file using faster-whisper."""
+        """Transcribe audio file using configured backend."""
         if not audio_path:
             return ""
 
         try:
-            with suppress_stderr():
-                print("  Processing with Whisper...", end="\r")
-                segments, info = self.model.transcribe(audio_path, language="en", beam_size=5)
-                text = " ".join([segment.text for segment in segments]).strip()
+            print("  Processing with Whisper...", end="\r")
+
+            if WHISPER_BACKEND == "whisper-cpp":
+                text = self._transcribe_with_whisper_cpp(audio_path)
+            else:
+                text = self._transcribe_with_faster_whisper(audio_path)
 
             if AUTO_PUNCTUATION and text:
                 text = self._apply_punctuation(text)
@@ -684,6 +702,43 @@ class VoiceTranscriber:
         except Exception as e:
             print(f"❌ Transcription error: {e}")
             return ""
+
+    def _transcribe_with_whisper_cpp(self, audio_path):
+        """Transcribe using whisper.cpp (Vulkan GPU accelerated)."""
+        result = subprocess.run(
+            [
+                WHISPER_CPP_PATH,
+                "-m", WHISPER_CPP_MODEL,
+                "-f", audio_path,
+                "-l", "en",
+                "-bs", "1",           # Greedy decoding (faster)
+                "-nt",                # No timestamps
+                "-np",                # No prints (only output)
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+
+        if result.returncode != 0:
+            raise Exception(f"whisper-cli failed: {result.stderr}")
+
+        # Parse output - whisper-cpp outputs text directly with -np flag
+        text = result.stdout.strip()
+        return text
+
+    def _transcribe_with_faster_whisper(self, audio_path):
+        """Transcribe using faster-whisper (Python)."""
+        with suppress_stderr():
+            segments, info = self.model.transcribe(
+                audio_path,
+                language="en",
+                beam_size=1,              # Greedy decoding (faster)
+                vad_filter=True,          # Skip silence
+                without_timestamps=True,  # Don't compute timestamps
+            )
+            text = " ".join([segment.text for segment in segments]).strip()
+        return text
 
     def _type_text(self, text):
         """Type text directly using ydotool (doesn't use clipboard)."""
