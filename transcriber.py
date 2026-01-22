@@ -106,6 +106,10 @@ class VoiceTranscriber:
         self.current_gain = MICROPHONE_GAIN  # Track current gain for auto-adjustment
         self._load_config()  # Load user config from JSON file
         self._setup_whisper()
+        self._find_audio_device()  # CRITICAL: Auto-detect
+        self._enable_usb_mic_agc()  # Enable AGC on USB mics
+        self._verify_audio_device()  # Verify device is working
+        self._find_keyboard_device()
 
     def _load_config(self):
         """Load user configuration from JSON file."""
