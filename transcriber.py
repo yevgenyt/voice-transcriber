@@ -622,19 +622,21 @@ class VoiceTranscriber:
     def _type_text(self, text):
         """Type text using clipboard + paste (works in browsers on Wayland)."""
         import time
-        try:
-            # Copy to clipboard using wl-copy
-            process = subprocess.run(
-                ["wl-copy", "--"],
-                input=text.encode('utf-8'),
-                capture_output=True,
-                timeout=2
-            )
-            if process.returncode != 0:
-                raise Exception("wl-copy failed")
+        import os
 
-            # Small delay to ensure clipboard is ready
-            time.sleep(0.1)
+        # Ensure Wayland display is set
+        env = os.environ.copy()
+
+        try:
+            # Copy to clipboard using wl-copy (pass text as argument, not stdin)
+            process = subprocess.Popen(
+                ["wl-copy", text],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            # Don't wait for wl-copy - it stays running to serve paste requests
+            time.sleep(0.15)
 
             # Paste using ydotool (Ctrl+V) - works with GNOME Wayland
             subprocess.run(["ydotool", "key", "ctrl+v"], capture_output=True, timeout=2)
