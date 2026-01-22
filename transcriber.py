@@ -641,8 +641,8 @@ class VoiceTranscriber:
             # Don't wait for wl-copy - it stays running to serve paste requests
             time.sleep(0.15)
 
-            # Paste using ydotool - Ctrl+Shift+V works in terminals and most modern apps
-            subprocess.run(["ydotool", "key", "ctrl+shift+v"], capture_output=True, timeout=2)
+            # Paste using Shift+Insert - universal paste shortcut
+            subprocess.run(["ydotool", "key", "shift+insert"], capture_output=True, timeout=2)
             return True
         except FileNotFoundError:
             # Fallback to pynput if tools not available
