@@ -628,9 +628,9 @@ class VoiceTranscriber:
         env = os.environ.copy()
 
         try:
-            # Copy to clipboard using wl-copy (pass text as argument, not stdin)
+            # Copy to clipboard using wl-copy with explicit text type
             process = subprocess.Popen(
-                ["wl-copy", text],
+                ["wl-copy", "-t", "text/plain", text],
                 env=env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
