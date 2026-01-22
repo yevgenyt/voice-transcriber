@@ -54,8 +54,7 @@ NOISE_GATE_REDUCTION = 0.1      # Gain reduction when gate is closed (0.1 = -20d
 NOISE_GATE_VERBOSE = False      # Set to True to see noise gate metrics after each recording
 
 # Keyboard reconnection settings
-KEYBOARD_RECONNECT_ATTEMPTS = 30    # Number of attempts before giving up
-KEYBOARD_RECONNECT_DELAY = 2        # Seconds between reconnection attempts
+KEYBOARD_RECONNECT_DELAY = 3        # Seconds between reconnection attempts
 
 # Audio level targets for normalization reporting
 IDEAL_FINAL_PEAK = 0.7  # Target peak after normalization + gain (lower = more amplification)
@@ -629,20 +628,24 @@ class VoiceTranscriber:
             pass  # Notification not available
 
     def _reconnect_keyboard(self):
-        """Attempt to reconnect to keyboard after disconnection."""
+        """Attempt to reconnect to keyboard after disconnection. Waits indefinitely."""
         import time
 
-        print("\n⏳ Waiting for keyboard to reconnect...")
+        print("\n⏳ Waiting for keyboard to reconnect (Ctrl+C to exit)...")
         self._send_notification("⌨️ Keyboard Disconnected", "Waiting for keyboard to reconnect...")
 
         # Flashing indicator characters
         flash_chars = ["⚠️ ", "   "]
+        attempt = 0
 
-        for attempt in range(KEYBOARD_RECONNECT_ATTEMPTS):
+        while True:
+            attempt += 1
+            elapsed_min = (attempt * KEYBOARD_RECONNECT_DELAY) // 60
+            elapsed_sec = (attempt * KEYBOARD_RECONNECT_DELAY) % 60
+
             # Flash the warning
             flash = flash_chars[attempt % 2]
-            remaining = KEYBOARD_RECONNECT_ATTEMPTS - attempt - 1
-            print(f"\r{flash}Keyboard disconnected - attempt {attempt + 1}/{KEYBOARD_RECONNECT_ATTEMPTS} ({remaining} left)  ", end="", flush=True)
+            print(f"\r{flash}Keyboard disconnected - waiting {elapsed_min}m {elapsed_sec:02d}s  ", end="", flush=True)
 
             time.sleep(KEYBOARD_RECONNECT_DELAY)
 
@@ -663,10 +666,6 @@ class VoiceTranscriber:
                         pass
             except Exception:
                 pass
-
-        print("\r❌ Keyboard reconnection failed after all attempts                    ")
-        self._send_notification("❌ Keyboard Not Found", "Please reconnect and restart transcriber")
-        return False
 
     def listen_for_hotkey(self):
         """Listen for hotkey using evdev."""
@@ -711,12 +710,9 @@ class VoiceTranscriber:
         except OSError as e:
             if e.errno == 19:  # ENODEV - No such device
                 print(f"\n⚠️  Keyboard disconnected")
-                if self._reconnect_keyboard():
-                    print("Resuming hotkey listener...\n")
-                    self.listen_for_hotkey()  # Restart the listener
-                else:
-                    print("\nPlease reconnect keyboard and restart the transcriber.")
-                    sys.exit(1)
+                self._reconnect_keyboard()  # Waits indefinitely until reconnected
+                print("Resuming hotkey listener...\n")
+                self.listen_for_hotkey()  # Restart the listener
             elif e.errno in (13, 1):  # EACCES (13) or EPERM (1) - Permission errors
                 print(f"\n✗ Permission error: {e}")
                 print("\nYou need to be in the 'input' group to read keyboard events.")
