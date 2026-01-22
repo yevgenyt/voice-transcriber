@@ -53,6 +53,10 @@ NOISE_GATE_THRESHOLD = 2.0      # Multiplier of noise floor to trigger gate open
 NOISE_GATE_REDUCTION = 0.1      # Gain reduction when gate is closed (0.1 = -20dB)
 NOISE_GATE_VERBOSE = False      # Set to True to see noise gate metrics after each recording
 
+# Keyboard reconnection settings
+KEYBOARD_RECONNECT_ATTEMPTS = 30    # Number of attempts before giving up
+KEYBOARD_RECONNECT_DELAY = 2        # Seconds between reconnection attempts
+
 # Audio level targets for normalization reporting
 IDEAL_FINAL_PEAK = 0.7  # Target peak after normalization + gain (lower = more amplification)
 IDEAL_FINAL_PEAK_MIN = 0.65
@@ -614,6 +618,38 @@ class VoiceTranscriber:
             print(f"❌ Transcription error: {e}")
             return ""
 
+    def _reconnect_keyboard(self):
+        """Attempt to reconnect to keyboard after disconnection."""
+        import time
+
+        print("\n⏳ Waiting for keyboard to reconnect...")
+
+        for attempt in range(KEYBOARD_RECONNECT_ATTEMPTS):
+            time.sleep(KEYBOARD_RECONNECT_DELAY)
+
+            try:
+                devices = list_devices()
+                for device_path in devices:
+                    try:
+                        device = InputDevice(device_path)
+                        if ecodes.EV_KEY in device.capabilities():
+                            keys = device.capabilities()[ecodes.EV_KEY]
+                            if ecodes.KEY_A in keys and ecodes.KEY_SPACE in keys:
+                                self.keyboard_device = device
+                                self.pressed_keys.clear()  # Reset key state
+                                print(f"✓ Keyboard reconnected: {device.name}")
+                                return True
+                    except (OSError, PermissionError):
+                        pass
+            except Exception:
+                pass
+
+            remaining = KEYBOARD_RECONNECT_ATTEMPTS - attempt - 1
+            print(f"  Attempt {attempt + 1}/{KEYBOARD_RECONNECT_ATTEMPTS} - no keyboard found ({remaining} attempts left)", end="\r")
+
+        print("\n❌ Keyboard reconnection failed after all attempts")
+        return False
+
     def listen_for_hotkey(self):
         """Listen for hotkey using evdev."""
         print("=" * 50)
@@ -656,18 +692,23 @@ class VoiceTranscriber:
             sys.exit(0)
         except OSError as e:
             if e.errno == 19:  # ENODEV - No such device
-                print(f"\n✗ Keyboard device disconnected: {e}")
-                print("\nYour keyboard was turned off or unplugged.")
-                print("Please reconnect it and restart the transcriber.")
+                print(f"\n⚠️  Keyboard disconnected")
+                if self._reconnect_keyboard():
+                    print("Resuming hotkey listener...\n")
+                    self.listen_for_hotkey()  # Restart the listener
+                else:
+                    print("\nPlease reconnect keyboard and restart the transcriber.")
+                    sys.exit(1)
             elif e.errno in (13, 1):  # EACCES (13) or EPERM (1) - Permission errors
                 print(f"\n✗ Permission error: {e}")
                 print("\nYou need to be in the 'input' group to read keyboard events.")
                 print("Run these commands:")
                 print("  sudo usermod -a -G input $USER")
                 print("  # Then log out and log back in")
+                sys.exit(1)
             else:
                 print(f"\n✗ Device error: {e}")
-            sys.exit(1)
+                sys.exit(1)
         except PermissionError as e:
             print(f"\n✗ Permission error: {e}")
             print("\nYou need to be in the 'input' group to read keyboard events.")
