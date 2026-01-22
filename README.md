@@ -6,13 +6,17 @@ Press **Left Shift + Left Ctrl + Space** to speak instructions. Your M6 ZealSoun
 
 - 🎤 **High-accuracy speech recognition** - OpenAI Whisper (medium model) runs offline
 - ✍️ **Auto-punctuation** - Automatically adds periods and capitalizes sentences
-- ⌨️ **Direct keyboard input** - Types into any active window
+- ⌨️ **Direct keyboard input** - Types into any active window (uses ydotool on Wayland/GNOME)
 - 🚀 **Simple hotkey activation** - Just press a key combination
 - 🎯 **Works anywhere** - Compatible with Wayland, X11, any Linux desktop
 - ⚡ **CPU optimized** - Fast transcription on CPU; ROCm GPU acceleration available (see notes)
 - 🔐 **Privacy-first** - All processing happens locally on your machine
 - 📊 **Audio level analysis** - Reports signal quality, noise floor, and SNR after each recording
 - 🔧 **Auto-gain adjustment** - Gradually optimizes microphone gain to ideal levels
+- 📈 **Visual recording indicator** - Color-coded progress bar shows recording duration
+- 🔇 **Noise gate** - Asymmetric attack/release reduces background noise
+- 🔌 **Auto-reconnect** - Automatically reconnects if keyboard disconnects
+- 🎙️ **AGC auto-enable** - Automatically enables microphone Auto Gain Control
 
 ## Quick Start
 
@@ -21,6 +25,12 @@ Press **Left Shift + Left Ctrl + Space** to speak instructions. Your M6 ZealSoun
 Add yourself to the `input` group:
 ```bash
 sudo usermod -a -G input $USER
+```
+
+Install ydotool for text input on Wayland/GNOME:
+```bash
+sudo apt install ydotool
+sudo chmod 0666 /dev/uinput  # Required for ydotool
 ```
 
 **IMPORTANT**: After this, log out completely and log back in.
@@ -65,22 +75,25 @@ Keyboard (evdev) ──→ Hotkey Detection ──→ Audio Recording (48kHz)
                            ↓
                     sounddevice (USB Mic)
                            ↓
+                    Noise Gate (5ms attack, 300ms release)
+                           ↓
                     scipy.signal (proper resampling to 16kHz)
                            ↓
                     faster-whisper (GPU accelerated)
                            ↓
-                    pynput (keyboard output + auto-punctuation)
+                    ydotool type (direct text input, no clipboard)
 ```
 
 ## Project Structure
 
 ```
 ~/Applications/voice-transcriber/
-├── transcriber.py          ← Main application (entry point)
-├── requirements.txt        ← Python dependencies
-├── launch.sh              ← Launcher script
-├── README.md              ← This file
-└── venv/                  ← Python virtual environment
+├── transcriber.py              ← Main application (entry point)
+├── transcriber_config.json     ← User settings (auto-managed)
+├── requirements.txt            ← Python dependencies
+├── launch.sh                   ← Launcher script
+├── README.md                   ← This file
+└── venv/                       ← Python virtual environment
 ```
 
 ## Files Overview
@@ -88,29 +101,47 @@ Keyboard (evdev) ──→ Hotkey Detection ──→ Audio Recording (48kHz)
 | File | Purpose |
 |------|---------|
 | `transcriber.py` | Main application with all critical fixes |
+| `transcriber_config.json` | User settings (microphone_gain) - auto-managed |
 | `requirements.txt` | All dependencies with versions |
 | `launch.sh` | Simple launcher (aliased as `transcriber`) |
 | `venv/` | Virtual environment with installed packages |
 
 ## Configuration
 
-Edit `transcriber.py` (lines 26-38) to customize:
+### User Settings (transcriber_config.json)
+
+User-adjustable settings are stored in a separate JSON file (auto-created on first run):
+
+```json
+{
+  "microphone_gain": 0.88
+}
+```
+
+This file is auto-managed - the gain value is tuned automatically based on audio analysis.
+
+### Application Constants (transcriber.py)
+
+Edit constants in `transcriber.py` to customize behavior:
 
 ```python
-WHISPER_MODEL = "medium"         # Options: tiny, base, small, medium, large
-AUTO_PUNCTUATION = True          # Add periods and capitalization
-USE_GPU = True                   # Use GPU if available (ROCm on AMD, CUDA on NVIDIA)
-MICROPHONE_GAIN = 0.88           # Microphone amplification (auto-tuned)
+WHISPER_MODEL = "medium"           # Options: tiny, base, small, medium, large
+AUTO_PUNCTUATION = True            # Add periods and capitalization
+USE_GPU = True                     # Use GPU if available (ROCm on AMD, CUDA on NVIDIA)
+MAX_RECORDING_DURATION = 300       # Safety limit: 5 minutes max recording
+
+# Noise gate settings
+NOISE_GATE_VERBOSE = False         # Set True for debug output
 
 # Audio level targets for normalization
-IDEAL_FINAL_PEAK = 0.8           # Target peak after processing (0.8 = conservative)
-IDEAL_FINAL_PEAK_MIN = 0.7       # Too quiet if below this
-IDEAL_FINAL_PEAK_MAX = 0.9       # Too loud if above this
+IDEAL_FINAL_PEAK = 0.8             # Target peak after processing
+IDEAL_FINAL_PEAK_MIN = 0.7         # Too quiet if below this
+IDEAL_FINAL_PEAK_MAX = 0.9         # Too loud if above this
 ```
 
 ### Auto-Gain Adjustment
 
-The transcriber automatically tunes `MICROPHONE_GAIN` by analyzing audio levels after each recording:
+The transcriber automatically tunes `microphone_gain` by analyzing audio levels after each recording:
 
 - **Measures** raw peak, noise floor, denoised signal, and final peak
 - **Calculates** SNR (signal-to-noise ratio) to assess audio quality
@@ -166,6 +197,23 @@ sudo usermod -a -G input $USER
 - Test recording: `arecord -D hw:1,0 -f cd /tmp/test.wav`
 - Speak clearly and close to microphone
 - Reduce background noise
+- Check AGC is enabled: `amixer -c 2 contents | grep -A2 "Auto Gain"`
+
+### Text not typing in applications
+
+ydotool requires uinput access:
+```bash
+sudo chmod 0666 /dev/uinput
+```
+
+Or add yourself to the uinput group:
+```bash
+sudo groupadd -f uinput
+sudo usermod -a -G uinput $USER
+echo 'KERNEL=="uinput", GROUP="uinput", MODE="0660"' | sudo tee /etc/udev/rules.d/99-uinput.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+# Log out and back in
+```
 
 ### Auto-detection didn't find my microphone
 
@@ -190,26 +238,40 @@ Find your device: `arecord -l`
 |-----------|-----------|---------|
 | Hotkey | evdev | Keyboard event monitoring (Wayland-native) |
 | Audio Capture | sounddevice | Microphone recording |
-| Audio Processing | scipy.signal, numpy | Resampling (anti-aliased) |
+| Audio Processing | scipy.signal, numpy | Resampling, noise gate |
 | Speech Recognition | faster-whisper | Offline transcription |
-| Keyboard Output | pynput | Type text into active window |
+| Text Input | ydotool | Direct typing on Wayland/GNOME |
+| Notifications | notify-send | Desktop notifications |
 
 ## Critical Implementation Details
 
 **Audio Pipeline:**
 - Records at 48kHz (microphone native rate)
+- Applies noise gate with asymmetric timing (5ms attack, 300ms release)
 - Resamples to 16kHz using scipy's polyphase filter (anti-aliasing)
-- Applies noise gating and peak normalization
+- Applies peak normalization
 - Feeds to Whisper for transcription
 
 **Thread Safety:**
-- Uses threading.Lock() for recording state
+- Uses `threading.Lock()` for recording state
+- Uses `threading.Event()` for stop signaling
 - Prevents race conditions on multi-core systems
 
 **Resource Management:**
 - Context managers for all file operations
 - Proper cleanup of temporary audio files
+- Thread cleanup on exit with join timeouts
 - No file descriptor leaks
+
+**Keyboard Handling:**
+- Auto-reconnect on keyboard disconnect (indefinite wait)
+- Desktop notifications via notify-send
+- Automatic AGC enabling for USB microphones
+
+**Text Input (Wayland/GNOME):**
+- Uses `ydotool type` for direct text input
+- No clipboard corruption (doesn't use wl-copy)
+- Works in browsers, terminals, and native apps
 
 ## Resuming Development
 
@@ -248,19 +310,30 @@ When you need to continue:
 ## What's Been Optimized
 
 ✅ **Critical Fixes Applied:**
-- Thread-safe recording with locks
+- Thread-safe recording with locks and events
 - Proper audio resampling with scipy (prevents aliasing)
 - Context managers for resource cleanup (no file leaks)
 - Auto-detection of audio device (portable across machines)
 - Complete requirements.txt with all dependencies
+- Race condition fixes in hotkey handler
+- Proper thread cleanup on exit
+- Max recording duration (5 min) safety limit
 
 ✅ **Audio Quality Features:**
 - Auto-punctuation (periods, capitalization)
 - High-accuracy Whisper (medium model for better transcription quality)
+- Noise gate with asymmetric timing (fast attack, slow release)
 - Audio level analysis (reports SNR, noise floor, peak levels)
 - Auto-gain adjustment (gradually optimizes microphone gain)
+- Auto AGC enabling for USB microphones
 - Intelligent thresholds (only adjusts >5% differences, clamps 0.1x-10.0x)
 - CPU-optimized with potential for ROCm GPU acceleration
+
+✅ **User Experience:**
+- Visual recording indicator with color-coded progress bar
+- Keyboard auto-reconnect with desktop notifications
+- Direct text input via ydotool (no clipboard corruption)
+- JSON config file for user settings (no source code modification)
 
 ## GPU Acceleration (Optional)
 
@@ -320,5 +393,5 @@ All data stays on your machine:
 
 ---
 
-**Status**: Production-ready with audio level analysis and auto-gain tuning. Using Whisper medium model on CPU.
-**Last Updated**: January 17, 2026 (Audio level analysis & auto-adjustment added)
+**Status**: Production-ready with noise gate, visual indicator, auto-reconnect, and ydotool text input.
+**Last Updated**: January 21, 2026 (Major refactor: noise gate, visual indicator, code quality fixes, ydotool support)
