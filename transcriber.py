@@ -620,38 +620,17 @@ class VoiceTranscriber:
             return ""
 
     def _type_text(self, text):
-        """Type text using clipboard + paste (works in browsers on Wayland)."""
-        import time
-        import os
-
-        # Ensure Wayland display is set
-        env = os.environ.copy()
-
+        """Type text directly using ydotool (doesn't use clipboard)."""
         try:
-            # Copy to both clipboard and primary selection
-            for flags in [[], ["-p"]]:
-                process = subprocess.Popen(
-                    ["wl-copy"] + flags,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    env=env
-                )
-                process.stdin.write(text.encode('utf-8'))
-                process.stdin.close()
-            # Don't wait for wl-copy - it stays running to serve paste requests
-            time.sleep(0.15)
-
-            # Paste using Shift+Insert - universal paste shortcut
-            subprocess.run(["ydotool", "key", "shift+insert"], capture_output=True, timeout=2)
+            # Type text directly - doesn't corrupt clipboard
+            subprocess.run(["ydotool", "type", "--", text], capture_output=True, timeout=10)
             return True
         except FileNotFoundError:
-            # Fallback to pynput if tools not available
+            # Fallback to pynput if ydotool not available
             self.keyboard_controller.type(text)
             return True
         except Exception as e:
             print(f"⚠️  Typing failed: {e}")
-            # Fallback to pynput
             try:
                 self.keyboard_controller.type(text)
                 return True
