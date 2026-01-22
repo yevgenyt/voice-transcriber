@@ -17,7 +17,7 @@ import threading
 from contextlib import contextmanager
 from faster_whisper import WhisperModel
 from pynput.keyboard import Controller
-from evdev import InputDevice, list_devices, ecodes
+from evdev import InputDevice, list_devices, ecodes, UInput
 import tempfile
 import atexit
 import subprocess
@@ -271,27 +271,42 @@ class VoiceTranscriber:
                 print("  # Then log out and log back in")
                 sys.exit(1)
 
-            keyboard_found = False
+            # Find all candidate keyboards
+            candidates = []
             for device_path in devices:
                 try:
                     device = InputDevice(device_path)
                     if ecodes.EV_KEY in device.capabilities():
                         keys = device.capabilities()[ecodes.EV_KEY]
                         if ecodes.KEY_A in keys and ecodes.KEY_SPACE in keys:
-                            print(f"✓ Keyboard found: {device.name}")
-                            print(f"  Device path: {device_path}")
-                            self.keyboard_device = device
-                            keyboard_found = True
-                            break
+                            name_lower = device.name.lower()
+                            # Skip devices that are clearly mice
+                            if 'mouse' in name_lower:
+                                continue
+                            candidates.append((device_path, device))
                 except (OSError, PermissionError):
                     pass
 
-            if not keyboard_found:
+            if not candidates:
                 print("✗ Could not find a usable keyboard device.")
                 print("\nTroubleshooting:")
                 print("1. Make sure you're in the 'input' group:")
                 print("   groups | grep input")
                 sys.exit(1)
+
+            # Prefer devices with "keyboard" in the name
+            for device_path, device in candidates:
+                if 'keyboard' in device.name.lower():
+                    print(f"✓ Keyboard found: {device.name}")
+                    print(f"  Device path: {device_path}")
+                    self.keyboard_device = device
+                    return
+
+            # Fallback to first candidate
+            device_path, device = candidates[0]
+            print(f"✓ Keyboard found: {device.name}")
+            print(f"  Device path: {device_path}")
+            self.keyboard_device = device
 
         except Exception as e:
             print(f"✗ Error finding keyboard device: {e}")
@@ -685,9 +700,25 @@ class VoiceTranscriber:
             except Exception:
                 pass
 
+    def _release_stuck_modifiers(self):
+        """Release any stuck modifier keys using evdev UInput."""
+        try:
+            # Create a virtual input device to send key-up events
+            ui = UInput()
+            # Release all common modifiers (key up = value 0)
+            for keycode in [ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT,
+                           ecodes.KEY_LEFTCTRL, ecodes.KEY_RIGHTCTRL,
+                           ecodes.KEY_LEFTALT, ecodes.KEY_RIGHTALT]:
+                ui.write(ecodes.EV_KEY, keycode, 0)  # 0 = key release
+            ui.syn()  # Sync to apply events
+            ui.close()
+        except Exception:
+            pass  # Best effort - requires /dev/uinput access
+
     def _reset_recording_state(self):
         """Reset all recording state (used after keyboard reconnection)."""
         self.pressed_keys.clear()
+        self._release_stuck_modifiers()  # Release any stuck modifier keys
         self.stop_recording_event.set()  # Stop any ongoing recording
         with self.recording_lock:
             self.is_recording = False
@@ -728,19 +759,41 @@ class VoiceTranscriber:
 
             try:
                 devices = list_devices()
+                # Find all candidate keyboards
+                candidates = []
                 for device_path in devices:
                     try:
                         device = InputDevice(device_path)
                         if ecodes.EV_KEY in device.capabilities():
                             keys = device.capabilities()[ecodes.EV_KEY]
                             if ecodes.KEY_A in keys and ecodes.KEY_SPACE in keys:
-                                self.keyboard_device = device
-                                self._reset_recording_state()  # Reset all recording state
-                                print(f"\r✓ Keyboard reconnected: {device.name}                              ")
-                                self._send_notification("✓ Keyboard Reconnected", device.name, urgency="normal")
-                                return True
+                                name_lower = device.name.lower()
+                                # Skip devices that are clearly mice
+                                if 'mouse' in name_lower:
+                                    continue
+                                candidates.append((device_path, device))
                     except (OSError, PermissionError):
                         pass
+
+                if not candidates:
+                    continue  # No candidates found, keep waiting
+
+                # Prefer devices with "keyboard" in the name
+                selected = None
+                for device_path, device in candidates:
+                    if 'keyboard' in device.name.lower():
+                        selected = device
+                        break
+
+                # Fallback to first candidate if no "keyboard" in name
+                if not selected:
+                    selected = candidates[0][1]
+
+                self.keyboard_device = selected
+                self._reset_recording_state()  # Reset all recording state
+                print(f"\r✓ Keyboard reconnected: {selected.name}                              ")
+                self._send_notification("✓ Keyboard Reconnected", selected.name, urgency="normal")
+                return True
             except Exception:
                 pass
 
