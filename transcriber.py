@@ -618,13 +618,32 @@ class VoiceTranscriber:
             print(f"❌ Transcription error: {e}")
             return ""
 
+    def _send_notification(self, title, message, urgency="critical"):
+        """Send desktop notification."""
+        try:
+            subprocess.run(
+                ["notify-send", "-u", urgency, "-a", "Voice Transcriber", title, message],
+                capture_output=True, timeout=2
+            )
+        except Exception:
+            pass  # Notification not available
+
     def _reconnect_keyboard(self):
         """Attempt to reconnect to keyboard after disconnection."""
         import time
 
         print("\n⏳ Waiting for keyboard to reconnect...")
+        self._send_notification("⌨️ Keyboard Disconnected", "Waiting for keyboard to reconnect...")
+
+        # Flashing indicator characters
+        flash_chars = ["⚠️ ", "   "]
 
         for attempt in range(KEYBOARD_RECONNECT_ATTEMPTS):
+            # Flash the warning
+            flash = flash_chars[attempt % 2]
+            remaining = KEYBOARD_RECONNECT_ATTEMPTS - attempt - 1
+            print(f"\r{flash}Keyboard disconnected - attempt {attempt + 1}/{KEYBOARD_RECONNECT_ATTEMPTS} ({remaining} left)  ", end="", flush=True)
+
             time.sleep(KEYBOARD_RECONNECT_DELAY)
 
             try:
@@ -637,17 +656,16 @@ class VoiceTranscriber:
                             if ecodes.KEY_A in keys and ecodes.KEY_SPACE in keys:
                                 self.keyboard_device = device
                                 self.pressed_keys.clear()  # Reset key state
-                                print(f"✓ Keyboard reconnected: {device.name}")
+                                print(f"\r✓ Keyboard reconnected: {device.name}                              ")
+                                self._send_notification("✓ Keyboard Reconnected", device.name, urgency="normal")
                                 return True
                     except (OSError, PermissionError):
                         pass
             except Exception:
                 pass
 
-            remaining = KEYBOARD_RECONNECT_ATTEMPTS - attempt - 1
-            print(f"  Attempt {attempt + 1}/{KEYBOARD_RECONNECT_ATTEMPTS} - no keyboard found ({remaining} attempts left)", end="\r")
-
-        print("\n❌ Keyboard reconnection failed after all attempts")
+        print("\r❌ Keyboard reconnection failed after all attempts                    ")
+        self._send_notification("❌ Keyboard Not Found", "Please reconnect and restart transcriber")
         return False
 
     def listen_for_hotkey(self):
