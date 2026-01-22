@@ -628,16 +628,17 @@ class VoiceTranscriber:
         env = os.environ.copy()
 
         try:
-            # Copy to clipboard using wl-copy via stdin (better compatibility)
-            process = subprocess.Popen(
-                ["wl-copy"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                env=env
-            )
-            process.stdin.write(text.encode('utf-8'))
-            process.stdin.close()
+            # Copy to both clipboard and primary selection
+            for flags in [[], ["-p"]]:
+                process = subprocess.Popen(
+                    ["wl-copy"] + flags,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=env
+                )
+                process.stdin.write(text.encode('utf-8'))
+                process.stdin.close()
             # Don't wait for wl-copy - it stays running to serve paste requests
             time.sleep(0.15)
 
