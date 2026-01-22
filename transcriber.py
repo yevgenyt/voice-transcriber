@@ -641,7 +641,9 @@ class VoiceTranscriber:
             # Don't wait for wl-copy - it stays running to serve paste requests
             time.sleep(0.15)
 
-            # Paste using ydotool (Ctrl+V) - works with GNOME Wayland
+            # Paste using ydotool - try Ctrl+Shift+V first (terminals), then Ctrl+V (apps)
+            subprocess.run(["ydotool", "key", "ctrl+shift+v"], capture_output=True, timeout=2)
+            time.sleep(0.05)
             subprocess.run(["ydotool", "key", "ctrl+v"], capture_output=True, timeout=2)
             return True
         except FileNotFoundError:
