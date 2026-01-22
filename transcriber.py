@@ -21,6 +21,8 @@ from evdev import InputDevice, list_devices, ecodes
 import tempfile
 import atexit
 import subprocess
+import json
+import time
 
 # Save original stderr for restoration
 original_stderr = sys.stderr
@@ -56,6 +58,12 @@ NOISE_GATE_VERBOSE = False      # Set to True to see noise gate metrics after ea
 # Keyboard reconnection settings
 KEYBOARD_RECONNECT_DELAY = 3        # Seconds between reconnection attempts
 
+# Recording limits
+MAX_RECORDING_DURATION = 300        # Maximum recording duration in seconds (5 minutes)
+
+# Config file path
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transcriber_config.json")
+
 # Audio level targets for normalization reporting
 IDEAL_FINAL_PEAK = 0.7  # Target peak after normalization + gain (lower = more amplification)
 IDEAL_FINAL_PEAK_MIN = 0.65
@@ -72,27 +80,53 @@ KEY_SPACE = ecodes.KEY_SPACE
 def suppress_stderr():
     """Context manager to suppress stderr without resource leaks."""
     old_stderr = sys.stderr
+    devnull = None
     try:
-        sys.stderr = open(os.devnull, 'w')
+        devnull = open(os.devnull, 'w')
+        sys.stderr = devnull
         yield
     finally:
-        sys.stderr.close()
         sys.stderr = old_stderr
+        if devnull is not None:
+            devnull.close()
 
 
 class VoiceTranscriber:
     def __init__(self):
         self.keyboard_controller = Controller()
         self.is_recording = False
-        self.should_stop_recording = False
+        self.stop_recording_event = threading.Event()  # Thread-safe stop signal
         self.recording_lock = threading.Lock()  # CRITICAL: Thread safety
+        self.recording_thread = None  # Track current recording thread
         self.pressed_keys = set()
         self.model = None
         self.keyboard_device = None
         self.audio_device = None
         self.device_channels = AUDIO_CHANNELS  # Will be updated by _find_audio_device
         self.current_gain = MICROPHONE_GAIN  # Track current gain for auto-adjustment
+        self._load_config()  # Load user config from JSON file
         self._setup_whisper()
+
+    def _load_config(self):
+        """Load user configuration from JSON file."""
+        try:
+            if os.path.exists(CONFIG_FILE):
+                with open(CONFIG_FILE, 'r') as f:
+                    config = json.load(f)
+                    self.current_gain = config.get('microphone_gain', MICROPHONE_GAIN)
+        except Exception as e:
+            print(f"⚠️  Could not load config: {e}")
+
+    def _save_config(self):
+        """Save user configuration to JSON file."""
+        try:
+            config = {
+                'microphone_gain': self.current_gain
+            }
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(config, f, indent=2)
+        except Exception as e:
+            print(f"⚠️  Could not save config: {e}")
         self._find_audio_device()  # CRITICAL: Auto-detect
         self._enable_usb_mic_agc()  # Enable AGC on USB mics (fixes silent mic after reconnect)
         self._verify_audio_device()  # Verify device is actually working
@@ -284,23 +318,8 @@ class VoiceTranscriber:
             self._update_config_gain(new_gain)
 
     def _update_config_gain(self, new_gain):
-        """Update MICROPHONE_GAIN in the config file."""
-        try:
-            config_path = os.path.abspath(__file__)
-            with open(config_path, 'r') as f:
-                content = f.read()
-
-            # Replace MICROPHONE_GAIN value
-            updated_content = re.sub(
-                r'(MICROPHONE_GAIN\s*=\s*)[\d.]+',
-                lambda m: f'{m.group(1)}{new_gain:.2f}',
-                content
-            )
-
-            with open(config_path, 'w') as f:
-                f.write(updated_content)
-        except Exception as e:
-            print(f"⚠️  Could not update config file: {e}")
+        """Update microphone gain in the config file."""
+        self._save_config()
 
     def _analyze_audio_levels(self, raw_audio, noise_sample, denoised_audio, final_audio):
         """Analyze and report audio levels with gain recommendations. Returns recommended gain."""
@@ -433,17 +452,10 @@ class VoiceTranscriber:
         else:
             return f"  🟢 [{duration:.1f}s] {bar_str}"
 
-    def record_and_transcribe(self):
-        """Record audio and transcribe it using Whisper."""
-        # CRITICAL FIX: Thread-safe recording check with lock
-        with self.recording_lock:
-            if self.is_recording:
-                return
-            self.is_recording = True
-
-        self.should_stop_recording = False
-        print("\n🎤 Recording... (release hotkey to stop)")
-        overflow_count = 0  # Track overflows across recording session
+    def _record_audio(self):
+        """Record audio from microphone. Returns (audio_data, overflow_count) or (None, 0) on error."""
+        overflow_count = 0
+        resampled_audio = []
 
         try:
             with suppress_stderr():
@@ -453,32 +465,30 @@ class VoiceTranscriber:
                     channels=self.device_channels,
                     blocksize=8192,
                     dtype=np.float32,
-                    latency="high"  # Allow larger buffers to prevent overflow
+                    latency="high"
                 )
 
                 with stream:
-                    resampled_audio = []
                     block_count = 0
+                    max_blocks = int(MAX_RECORDING_DURATION * SAMPLE_RATE / 8192)
 
-                    while not self.should_stop_recording:
+                    while not self.stop_recording_event.is_set() and block_count < max_blocks:
                         try:
                             data, overflowed = stream.read(8192)
                             if overflowed:
                                 overflow_count += 1
                                 if overflow_count == 1:
-                                    print("⚠️  Audio buffer overflowing - reconnect mic or reduce background noise")
-                                # Skip this corrupted block
+                                    print("⚠️  Audio buffer overflowing")
                                 continue
 
-                            # Convert to mono if needed
+                            # Convert to mono
                             if self.device_channels == 1:
-                                mono_data = data.flatten()  # Already mono
+                                mono_data = data.flatten()
                             elif self.device_channels == 2:
-                                mono_data = data.mean(axis=1)  # Stereo to mono
+                                mono_data = data.mean(axis=1)
                             else:
-                                mono_data = data[:, 0]  # Multi-channel, use first channel
+                                mono_data = data[:, 0]
 
-                            # CRITICAL FIX: Proper resampling
                             resampled = self._resample_audio(mono_data, SAMPLE_RATE, WHISPER_SAMPLE_RATE)
                             resampled_audio.append(resampled)
 
@@ -488,75 +498,98 @@ class VoiceTranscriber:
                                 indicator = self._format_recording_indicator(duration)
                                 print(f"{indicator:<50}", end="\r")
 
+                            # Check for max duration
+                            if block_count >= max_blocks:
+                                print(f"\n⚠️  Max recording duration ({MAX_RECORDING_DURATION}s) reached")
+
                         except Exception as e:
                             print(f"⚠️  Error recording: {e}")
                             continue
 
-                    # Process and normalize audio
-                    if resampled_audio:
-                        all_audio = np.concatenate(resampled_audio)
-                        peak = np.abs(all_audio).max()
-
-                        if peak > 0:
-                            # Boundary check: CRITICAL FIX
-                            if len(resampled_audio) >= 10:
-                                noise_sample = np.abs(np.concatenate(resampled_audio[:len(resampled_audio)//10])).mean()
-                            else:
-                                noise_sample = np.abs(all_audio[:len(all_audio)//10]).mean()
-
-                            # Calculate SNR before noise gate
-                            raw_rms = np.sqrt(np.mean(all_audio ** 2))
-                            snr_before = 20 * np.log10(raw_rms / noise_sample) if noise_sample > 0 else 0
-
-                            # Apply noise gate with fast attack / slow release
-                            gated_audio, gate_metrics = self._apply_noise_gate(
-                                all_audio, WHISPER_SAMPLE_RATE, noise_sample
-                            )
-
-                            # Calculate SNR after noise gate
-                            gated_rms = np.sqrt(np.mean(gated_audio ** 2))
-                            snr_after = 20 * np.log10(gated_rms / (noise_sample * NOISE_GATE_REDUCTION)) if noise_sample > 0 else 0
-
-                            # Show before/after comparison (optional)
-                            if NOISE_GATE_VERBOSE:
-                                print(f"\n🔇 Noise gate: silence {gate_metrics['silence_reduction_db']:.1f}dB | "
-                                      f"speech {gate_metrics['speech_preserved_pct']:.0f}% preserved | "
-                                      f"gate active {gate_metrics['gate_active_pct']:.0f}%")
-
-                            audio_denoised = gated_audio.copy()
-                            audio_denoised[np.abs(audio_denoised) < noise_sample * 1.5 * NOISE_GATE_REDUCTION] = 0
-
-                            peak_denoised = np.abs(audio_denoised).max()
-                            if peak_denoised > 0:
-                                normalized = (audio_denoised / peak_denoised) * 0.95
-                            else:
-                                normalized = gated_audio / np.abs(gated_audio).max() * 0.9 if np.abs(gated_audio).max() > 0 else gated_audio
-                        else:
-                            normalized = all_audio
-                            noise_sample = 0
-                            audio_denoised = all_audio
-                            gated_audio = all_audio
-
-                        # Apply gain
-                        amplified = np.clip(normalized * self.current_gain, -0.95, 0.95)
-                        audio_int16 = (amplified * 32767).astype(np.int16)
-
-                        # Analyze and report audio levels
-                        recommended_gain = self._analyze_audio_levels(all_audio, noise_sample, audio_denoised, amplified)
-
-                        # Auto-adjust gain gradually (50% of difference)
-                        self._apply_gradual_gain_adjustment(recommended_gain)
-
-                        # Save to temp file
-                        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                            with sf.SoundFile(tmp.name, 'w', WHISPER_SAMPLE_RATE, 1, 'PCM_16') as f:
-                                f.write(audio_int16)
-                            temp_path = tmp.name
-                    else:
-                        temp_path = None
+            if resampled_audio:
+                return np.concatenate(resampled_audio), overflow_count
+            return None, overflow_count
 
         except Exception as e:
             print(f"⚠️  Recording error: {e}")
+            return None, overflow_count
+
+    def _process_audio(self, all_audio):
+        """Process recorded audio: noise gate, normalization, gain. Returns processed audio or None."""
+        if all_audio is None or len(all_audio) == 0:
+            return None, 0
+
+        peak = np.abs(all_audio).max()
+        if peak == 0:
+            return all_audio, 0
+
+        # Calculate noise floor with safety check for short recordings
+        min_samples = max(160, len(all_audio) // 10)  # At least 10ms or 10% of audio
+        if len(all_audio) < min_samples:
+            noise_sample = np.abs(all_audio).mean()
+        else:
+            noise_sample = np.abs(all_audio[:min_samples]).mean()
+
+        # Ensure noise_sample is valid
+        if noise_sample == 0 or np.isnan(noise_sample):
+            noise_sample = 0.001  # Fallback to small value
+
+        # Apply noise gate
+        gated_audio, gate_metrics = self._apply_noise_gate(all_audio, WHISPER_SAMPLE_RATE, noise_sample)
+
+        if NOISE_GATE_VERBOSE:
+            print(f"\n🔇 Noise gate: silence {gate_metrics['silence_reduction_db']:.1f}dB | "
+                  f"speech {gate_metrics['speech_preserved_pct']:.0f}% preserved | "
+                  f"gate active {gate_metrics['gate_active_pct']:.0f}%")
+
+        # Normalize (noise gate already handled noise reduction, no need for hard threshold)
+        peak_gated = np.abs(gated_audio).max()
+        if peak_gated > 0:
+            normalized = (gated_audio / peak_gated) * 0.95
+        else:
+            normalized = gated_audio
+
+        # Apply gain
+        amplified = np.clip(normalized * self.current_gain, -0.95, 0.95)
+
+        # Analyze and auto-adjust
+        recommended_gain = self._analyze_audio_levels(all_audio, noise_sample, gated_audio, amplified)
+        self._apply_gradual_gain_adjustment(recommended_gain)
+
+        return amplified, noise_sample
+
+    def record_and_transcribe(self):
+        """Record audio and transcribe it using Whisper."""
+        self.stop_recording_event.clear()
+        print("\n🎤 Recording... (release hotkey to stop)")
+
+        # Record audio
+        all_audio, overflow_count = self._record_audio()
+
+        if all_audio is None or len(all_audio) == 0:
+            print("❌ No audio recorded\n")
+            with self.recording_lock:
+                self.is_recording = False
+            return
+
+        # Process audio
+        amplified, noise_sample = self._process_audio(all_audio)
+
+        if amplified is None:
+            print("❌ Audio processing failed\n")
+            with self.recording_lock:
+                self.is_recording = False
+            return
+
+        # Save to temp file
+        audio_int16 = (amplified * 32767).astype(np.int16)
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                with sf.SoundFile(tmp.name, 'w', WHISPER_SAMPLE_RATE, 1, 'PCM_16') as f:
+                    f.write(audio_int16)
+                temp_path = tmp.name
+        except Exception as e:
+            print(f"⚠️  Error saving audio: {e}")
             with self.recording_lock:
                 self.is_recording = False
             return
@@ -572,14 +605,14 @@ class VoiceTranscriber:
         if transcribed_text:
             print(f"📝 Transcribed: \"{transcribed_text}\"")
             if self._type_text(transcribed_text + " "):
-                print("✓ Text pasted into active window\n")
+                print("✓ Text typed into active window\n")
             else:
-                print("❌ Failed to paste text\n")
+                print("❌ Failed to type text\n")
         else:
             print("❌ No speech detected\n")
 
         # Cleanup temp file
-        if temp_path and os.path.exists(temp_path):
+        if os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
             except OSError:
@@ -637,6 +670,28 @@ class VoiceTranscriber:
             except Exception:
                 return False
 
+    def _cleanup(self):
+        """Clean up resources before exit."""
+        self.stop_recording_event.set()
+        if self.recording_thread and self.recording_thread.is_alive():
+            self.recording_thread.join(timeout=3)
+        if self.keyboard_device:
+            try:
+                self.keyboard_device.close()
+            except Exception:
+                pass
+
+    def _reset_recording_state(self):
+        """Reset all recording state (used after keyboard reconnection)."""
+        self.pressed_keys.clear()
+        self.stop_recording_event.set()  # Stop any ongoing recording
+        with self.recording_lock:
+            self.is_recording = False
+        # Wait for recording thread to finish if running
+        if self.recording_thread and self.recording_thread.is_alive():
+            self.recording_thread.join(timeout=2)
+        self.recording_thread = None
+
     def _send_notification(self, title, message, urgency="critical"):
         """Send desktop notification."""
         try:
@@ -649,8 +704,6 @@ class VoiceTranscriber:
 
     def _reconnect_keyboard(self):
         """Attempt to reconnect to keyboard after disconnection. Waits indefinitely."""
-        import time
-
         print("\n⏳ Waiting for keyboard to reconnect (Ctrl+C to exit)...")
         self._send_notification("⌨️ Keyboard Disconnected", "Waiting for keyboard to reconnect...")
 
@@ -678,7 +731,7 @@ class VoiceTranscriber:
                             keys = device.capabilities()[ecodes.EV_KEY]
                             if ecodes.KEY_A in keys and ecodes.KEY_SPACE in keys:
                                 self.keyboard_device = device
-                                self.pressed_keys.clear()  # Reset key state
+                                self._reset_recording_state()  # Reset all recording state
                                 print(f"\r✓ Keyboard reconnected: {device.name}                              ")
                                 self._send_notification("✓ Keyboard Reconnected", device.name, urgency="normal")
                                 return True
@@ -712,8 +765,14 @@ class VoiceTranscriber:
                             self.pressed_keys.add(KEY_LEFTCTRL)
                         elif event.code == KEY_SPACE:
                             if KEY_LEFTSHIFT in self.pressed_keys and KEY_LEFTCTRL in self.pressed_keys:
-                                if not self.is_recording:
-                                    threading.Thread(target=self.record_and_transcribe, daemon=False).start()
+                                # Fix race condition: check and set inside lock
+                                with self.recording_lock:
+                                    if not self.is_recording:
+                                        self.is_recording = True
+                                        self.recording_thread = threading.Thread(
+                                            target=self.record_and_transcribe, daemon=True
+                                        )
+                                        self.recording_thread.start()
 
                     elif key_event == 0:  # Key release
                         if event.code == KEY_LEFTSHIFT:
@@ -722,10 +781,11 @@ class VoiceTranscriber:
                             self.pressed_keys.discard(KEY_LEFTCTRL)
                         elif event.code == KEY_SPACE:
                             if self.is_recording:
-                                self.should_stop_recording = True
+                                self.stop_recording_event.set()  # Thread-safe stop signal
 
         except KeyboardInterrupt:
             print("\n\n👋 Transcriber stopped")
+            self._cleanup()
             sys.exit(0)
         except OSError as e:
             if e.errno == 19:  # ENODEV - No such device
