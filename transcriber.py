@@ -571,8 +571,10 @@ class VoiceTranscriber:
 
         if transcribed_text:
             print(f"📝 Transcribed: \"{transcribed_text}\"")
-            self.keyboard_controller.type(transcribed_text + " ")
-            print("✓ Text typed into active window\n")
+            if self._type_text(transcribed_text + " "):
+                print("✓ Text pasted into active window\n")
+            else:
+                print("❌ Failed to paste text\n")
         else:
             print("❌ No speech detected\n")
 
@@ -616,6 +618,39 @@ class VoiceTranscriber:
         except Exception as e:
             print(f"❌ Transcription error: {e}")
             return ""
+
+    def _type_text(self, text):
+        """Type text using clipboard + paste (works in browsers on Wayland)."""
+        try:
+            # Copy to clipboard using wl-copy
+            process = subprocess.run(
+                ["wl-copy", "--"],
+                input=text.encode('utf-8'),
+                capture_output=True,
+                timeout=2
+            )
+            if process.returncode != 0:
+                raise Exception("wl-copy failed")
+
+            # Small delay to ensure clipboard is ready
+            import time
+            time.sleep(0.05)
+
+            # Paste using wtype (Ctrl+V)
+            subprocess.run(["wtype", "-M", "ctrl", "v", "-m", "ctrl"], timeout=2)
+            return True
+        except FileNotFoundError:
+            # Fallback to pynput if wl-copy/wtype not available
+            self.keyboard_controller.type(text)
+            return True
+        except Exception as e:
+            print(f"⚠️  Typing failed: {e}")
+            # Fallback to pynput
+            try:
+                self.keyboard_controller.type(text)
+                return True
+            except Exception:
+                return False
 
     def _send_notification(self, title, message, urgency="critical"):
         """Send desktop notification."""
