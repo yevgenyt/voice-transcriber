@@ -3,7 +3,7 @@
 Voice transcriber using OpenAI Whisper and evdev for hotkey activation.
 Works with both Wayland and X11. No sudo required with proper udev rules.
 
-Hotkey: Left Shift + Left Ctrl + Space
+Hotkey: Left Alt + Right Alt (release Right Alt to paste)
 """
 
 import os
@@ -15,39 +15,23 @@ import soundfile as sf
 import scipy.signal
 import threading
 from contextlib import contextmanager
-from faster_whisper import WhisperModel
-from pynput.keyboard import Controller
 from evdev import InputDevice, list_devices, ecodes, UInput
 import tempfile
-import atexit
 import subprocess
 import json
 import time
 
-# Save original stderr for restoration
-original_stderr = sys.stderr
-
-# Suppress pynput cleanup errors on exit
-def _suppress_pynput_exit_errors():
-    """Suppress harmless pynput cleanup errors at exit."""
-    sys.stderr = open(os.devnull, 'w')
-
-atexit.register(_suppress_pynput_exit_errors)
 
 # Configuration
-WHISPER_MODEL = "distil-small.en"
-SILENCE_TIMEOUT = 1
 SAMPLE_RATE = 48000
 AUDIO_CHANNELS = 2
 MICROPHONE_GAIN = 0.77
-AUTO_PUNCTUATION = True
-USE_GPU = True
 WHISPER_SAMPLE_RATE = 16000
 
-# Whisper backend: "faster-whisper" or "whisper-cpp"
-WHISPER_BACKEND = "whisper-cpp"
+# whisper.cpp paths
 WHISPER_CPP_PATH = os.path.expanduser("~/Applications/whisper.cpp/build/bin/whisper-cli")
-WHISPER_CPP_MODEL = os.path.expanduser("~/Applications/whisper.cpp/models/ggml-small.en.bin")
+WHISPER_CPP_MODEL = os.path.expanduser("~/Applications/whisper.cpp/models/ggml-small.bin")
+
 
 # Recording duration thresholds (seconds)
 RECORDING_WARN_THRESHOLD = 30   # Yellow warning
@@ -75,10 +59,9 @@ IDEAL_FINAL_PEAK_MIN = 0.65
 IDEAL_FINAL_PEAK_MAX = 0.85
 AUDIO_ANALYSIS_VERBOSE = False  # Set to True to see detailed level breakdown
 
-# Hotkey codes
-KEY_LEFTSHIFT = ecodes.KEY_LEFTSHIFT
-KEY_LEFTCTRL = ecodes.KEY_LEFTCTRL
-KEY_SPACE = ecodes.KEY_SPACE
+# Hotkey codes (Left Alt + Right Alt to record, release to stop and paste)
+KEY_LEFTALT = ecodes.KEY_LEFTALT
+KEY_RIGHTALT = ecodes.KEY_RIGHTALT
 
 
 @contextmanager
@@ -98,13 +81,11 @@ def suppress_stderr():
 
 class VoiceTranscriber:
     def __init__(self):
-        self.keyboard_controller = Controller()
         self.is_recording = False
         self.stop_recording_event = threading.Event()  # Thread-safe stop signal
         self.recording_lock = threading.Lock()  # CRITICAL: Thread safety
         self.recording_thread = None  # Track current recording thread
         self.pressed_keys = set()
-        self.model = None
         self.keyboard_device = None
         self.audio_device = None
         self.device_channels = AUDIO_CHANNELS  # Will be updated by _find_audio_device
@@ -138,38 +119,14 @@ class VoiceTranscriber:
             print(f"⚠️  Could not save config: {e}")
 
     def _setup_whisper(self):
-        """Initialize Whisper model."""
-        if WHISPER_BACKEND == "whisper-cpp":
-            print("Using whisper.cpp backend (Vulkan GPU)...")
-            # Verify whisper-cpp exists
-            if not os.path.exists(WHISPER_CPP_PATH):
-                print(f"❌ whisper-cli not found at: {WHISPER_CPP_PATH}")
-                sys.exit(1)
-            if not os.path.exists(WHISPER_CPP_MODEL):
-                print(f"❌ whisper.cpp model not found at: {WHISPER_CPP_MODEL}")
-                sys.exit(1)
-            print(f"✓ whisper.cpp ready (model: {os.path.basename(WHISPER_CPP_MODEL)})")
-            self.model = None  # Not used with whisper-cpp
-        else:
-            print("Initializing Whisper (faster-whisper)...")
-            # Detect GPU
-            import torch
-            gpu_available = torch.cuda.is_available()
-            device = "cuda" if (gpu_available and USE_GPU) else "cpu"
-            compute_type = "float16" if (gpu_available and USE_GPU) else "int8"
-
-            if gpu_available and USE_GPU:
-                print(f"✓ GPU detected: {torch.cuda.get_device_name(0)}")
-            else:
-                print(f"  Using CPU (GPU not available or disabled)")
-
-            try:
-                with suppress_stderr():
-                    self.model = WhisperModel(WHISPER_MODEL, device=device, compute_type=compute_type)
-                print(f"✓ Whisper {WHISPER_MODEL} initialized on {device.upper()}")
-            except Exception as e:
-                print(f"❌ Error loading Whisper: {e}")
-                sys.exit(1)
+        """Verify whisper.cpp installation."""
+        if not os.path.exists(WHISPER_CPP_PATH):
+            print(f"❌ whisper-cli not found at: {WHISPER_CPP_PATH}")
+            sys.exit(1)
+        if not os.path.exists(WHISPER_CPP_MODEL):
+            print(f"❌ Model not found at: {WHISPER_CPP_MODEL}")
+            sys.exit(1)
+        print(f"✓ whisper.cpp ready (Vulkan GPU)")
 
     def _find_audio_device(self):
         """Auto-detect audio input device."""
@@ -286,7 +243,7 @@ class VoiceTranscriber:
                 device = InputDevice(device_path)
                 if ecodes.EV_KEY in device.capabilities():
                     keys = device.capabilities()[ecodes.EV_KEY]
-                    if ecodes.KEY_A in keys and ecodes.KEY_SPACE in keys:
+                    if ecodes.KEY_A in keys and ecodes.KEY_RIGHTALT in keys:
                         name = device.name
                         name_lower = name.lower()
                         # Skip devices that are clearly mice
@@ -649,16 +606,11 @@ class VoiceTranscriber:
         print("\n⏳ Transcribing...")
         transcribed_text = self._transcribe_audio(temp_path)
 
-        print(" " * 100, end="\r")
-
         if transcribed_text:
-            print(f"📝 Transcribed: \"{transcribed_text}\"")
-            if self._type_text(transcribed_text + " "):
-                print("✓ Text typed into active window\n")
-            else:
-                print("❌ Failed to type text\n")
+            print(f"📝 \"{transcribed_text}\"")
+            self._type_text(transcribed_text + " ")
         else:
-            print("❌ No speech detected\n")
+            print("❌ No speech detected")
 
         # Cleanup temp file
         if os.path.exists(temp_path):
@@ -683,80 +635,77 @@ class VoiceTranscriber:
         return text
 
     def _transcribe_audio(self, audio_path):
-        """Transcribe audio file using configured backend."""
+        """Transcribe audio file using whisper.cpp."""
         if not audio_path:
             return ""
 
         try:
-            print("  Processing with Whisper...", end="\r")
+            result = subprocess.run(
+                [
+                    WHISPER_CPP_PATH,
+                    "-m", WHISPER_CPP_MODEL,
+                    "-f", audio_path,
+                    "-l", "auto",
+                    "-bs", "1",           # Greedy decoding (faster)
+                    "-nt",                # No timestamps
+                    "-np",                # No prints (only output)
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
 
-            if WHISPER_BACKEND == "whisper-cpp":
-                text = self._transcribe_with_whisper_cpp(audio_path)
-            else:
-                text = self._transcribe_with_faster_whisper(audio_path)
+            if result.returncode != 0:
+                raise Exception(f"whisper-cli failed: {result.stderr}")
 
-            if AUTO_PUNCTUATION and text:
-                text = self._apply_punctuation(text)
+            text = result.stdout.strip()
+            return self._apply_punctuation(text) if text else ""
 
-            return text
         except Exception as e:
             print(f"❌ Transcription error: {e}")
             return ""
 
-    def _transcribe_with_whisper_cpp(self, audio_path):
-        """Transcribe using whisper.cpp (Vulkan GPU accelerated)."""
-        result = subprocess.run(
-            [
-                WHISPER_CPP_PATH,
-                "-m", WHISPER_CPP_MODEL,
-                "-f", audio_path,
-                "-l", "en",
-                "-bs", "1",           # Greedy decoding (faster)
-                "-nt",                # No timestamps
-                "-np",                # No prints (only output)
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60
-        )
-
-        if result.returncode != 0:
-            raise Exception(f"whisper-cli failed: {result.stderr}")
-
-        # Parse output - whisper-cpp outputs text directly with -np flag
-        text = result.stdout.strip()
-        return text
-
-    def _transcribe_with_faster_whisper(self, audio_path):
-        """Transcribe using faster-whisper (Python)."""
-        with suppress_stderr():
-            segments, info = self.model.transcribe(
-                audio_path,
-                language="en",
-                beam_size=1,              # Greedy decoding (faster)
-                vad_filter=True,          # Skip silence
-                without_timestamps=True,  # Don't compute timestamps
-            )
-            text = " ".join([segment.text for segment in segments]).strip()
-        return text
-
     def _type_text(self, text):
-        """Type text directly using ydotool (doesn't use clipboard)."""
+        """Insert text via clipboard (supports all Unicode including Cyrillic)."""
         try:
-            # Type text directly - doesn't corrupt clipboard
-            subprocess.run(["ydotool", "type", "--", text], capture_output=True, timeout=10)
+            # Copy to Wayland clipboard (native Wayland apps)
+            subprocess.Popen(
+                ["wl-copy", "--type", "text/plain", "--", text],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            # Copy to X11 clipboard (XWayland apps like Cursor/Electron)
+            xclip_proc = subprocess.Popen(
+                ["xclip", "-selection", "clipboard"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            xclip_proc.communicate(input=text.encode("utf-8"))
+
+            # Wait for clipboard to be ready
+            time.sleep(0.2)
+
+            # Auto-paste with Ctrl+Shift+V (Cursor/Electron apps need this)
+            # Higher delays help with ydotool reliability without ydotoold daemon
+            subprocess.run(
+                ["ydotool", "key", "--delay", "100", "--key-delay", "20", "ctrl+shift+v"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            print("\a", end="", flush=True)  # Terminal bell
+            print("✓ Pasted\n")
             return True
-        except FileNotFoundError:
-            # Fallback to pynput if ydotool not available
-            self.keyboard_controller.type(text)
-            return True
+
+        except FileNotFoundError as e:
+            print(f"⚠️  Clipboard tool not found: {e}")
+            return False
         except Exception as e:
-            print(f"⚠️  Typing failed: {e}")
-            try:
-                self.keyboard_controller.type(text)
-                return True
-            except Exception:
-                return False
+            print(f"⚠️  Copy failed: {e}")
+            return False
 
     def _cleanup(self):
         """Clean up resources before exit."""
@@ -850,13 +799,10 @@ class VoiceTranscriber:
 
     def listen_for_hotkey(self):
         """Listen for hotkey using evdev."""
-        print("=" * 50)
-        print("🎙️  Voice Transcriber Started")
-        print("=" * 50)
-        print(f"Hotkey: Left Shift + Left Ctrl + Space")
-        print(f"Model: Whisper {WHISPER_MODEL}")
-        print("Features: Auto-punctuation\n")
-        print("Press Ctrl+C to exit\n")
+        print("\n🎙️  Voice Transcriber")
+        print(f"   Model: {os.path.basename(WHISPER_CPP_MODEL)}")
+        print(f"   Hotkey: Left Alt + Right Alt")
+        print(f"   Ready! (Ctrl+C to exit)\n")
 
         try:
             while True:
@@ -867,13 +813,10 @@ class VoiceTranscriber:
                     key_event = event.value
 
                     if key_event == 1:  # Key press
-                        if event.code == KEY_LEFTSHIFT:
-                            self.pressed_keys.add(KEY_LEFTSHIFT)
-                        elif event.code == KEY_LEFTCTRL:
-                            self.pressed_keys.add(KEY_LEFTCTRL)
-                        elif event.code == KEY_SPACE:
-                            if KEY_LEFTSHIFT in self.pressed_keys and KEY_LEFTCTRL in self.pressed_keys:
-                                # Fix race condition: check and set inside lock
+                        if event.code == KEY_LEFTALT:
+                            self.pressed_keys.add(KEY_LEFTALT)
+                        elif event.code == KEY_RIGHTALT:
+                            if KEY_LEFTALT in self.pressed_keys:
                                 with self.recording_lock:
                                     if not self.is_recording:
                                         self.is_recording = True
@@ -883,13 +826,11 @@ class VoiceTranscriber:
                                         self.recording_thread.start()
 
                     elif key_event == 0:  # Key release
-                        if event.code == KEY_LEFTSHIFT:
-                            self.pressed_keys.discard(KEY_LEFTSHIFT)
-                        elif event.code == KEY_LEFTCTRL:
-                            self.pressed_keys.discard(KEY_LEFTCTRL)
-                        elif event.code == KEY_SPACE:
+                        if event.code == KEY_LEFTALT:
+                            self.pressed_keys.discard(KEY_LEFTALT)
+                        elif event.code == KEY_RIGHTALT:
                             if self.is_recording:
-                                self.stop_recording_event.set()  # Thread-safe stop signal
+                                self.stop_recording_event.set()
 
         except KeyboardInterrupt:
             print("\n\n👋 Transcriber stopped")
